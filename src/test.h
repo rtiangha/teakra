@@ -27,7 +27,7 @@ struct State {
     std::array<u16, TestSpaceSize> test_space_y;
 };
 
-static_assert(std::is_trivially_copyable_v<State>);
+static_assert(std::is_trivially_copyable<State>::value);
 
 struct TestCase {
     State before, after;
@@ -35,4 +35,4 @@ struct TestCase {
 };
 
 static_assert(sizeof(TestCase) == 4312);
-static_assert(std::is_trivially_copyable_v<TestCase>);
+static_assert(std::is_trivially_copyable<TestCase>::value);

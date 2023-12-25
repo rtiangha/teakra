@@ -35,11 +35,11 @@ void SetColor(Color color, Color background) {
 
 
 void FlushCache(void* ptr, u32 size) {
-    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, ptr, size);
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 void InvalidateCache(void* ptr, u32 size) {
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, ptr, size);
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 

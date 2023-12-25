@@ -11,7 +11,7 @@
 #include "cdc_bin.h"
 
 #define COMMON_TYPE_3DS
-#include "../../src/test.h"
+#include "../../../src/test.h"
 
 PrintConsole topScreen, bottomScreen;
 
@@ -169,11 +169,11 @@ void PrintAll() {
 }
 
 void FlushCache(void* ptr, u32 size) {
-    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, ptr, size);
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 void InvalidateCache(void* ptr, u32 size) {
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, ptr, size);
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 void StartDspProgram() {

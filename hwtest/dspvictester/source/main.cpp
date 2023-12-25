@@ -33,11 +33,11 @@ void SetColor(Color color, Color background) {
 }
 
 void FlushCache(volatile void* ptr, u32 size) {
-    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (void*)ptr, size);
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 void InvalidateCache(volatile void* ptr, u32 size) {
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (void*)ptr, size);
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
 
 vu16* dspP = (vu16*)0x1FF00000;
