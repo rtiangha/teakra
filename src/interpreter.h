@@ -83,6 +83,7 @@ public:
                 regs.ipv = 1;
             }
 
+            //std::printf("PC 0x%x\n", regs.pc);
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
             auto& decoder = decoders[opcode];
             u16 expand_value = 0;
