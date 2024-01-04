@@ -20,9 +20,9 @@ void Btdmp::Reset() {
     transmit_queue = {};
 }
 
-void Btdmp::Tick() {
+void Btdmp::Tick(u64 ticks) {
     if (transmit_enable) {
-        ++transmit_timer;
+        transmit_timer += ticks;
         if (transmit_timer >= transmit_period) {
             transmit_timer = 0;
             std::array<std::int16_t, 2> sample;

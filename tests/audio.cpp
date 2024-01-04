@@ -15,7 +15,7 @@ if (R_FAILED(call)) {                  \
 }
 
 std::vector<u8> loadDspFirmFromFile() {
-    FILE *f = fopen("dspfirm.cdc", "rb");
+    FILE *f = fopen("dspaudio.cdc", "rb");
 
     if (!f) {
         printf("Couldn't find dspfirm\n");
@@ -154,24 +154,24 @@ void AudioState::initSharedMem() {
     for (auto& config : write().source_configurations->config) {
         {
             config.enable = 0;
-            config.enable_dirty = true;
+            config.enable_dirty.Assign(1);
         }
 
         {
             config.interpolation_mode = DSP::HLE::SourceConfiguration::Configuration::InterpolationMode::None;
             config.interpolation_related = 0;
-            config.interpolation_dirty = true;
+            config.interpolation_dirty.Assign(1);
         }
 
         {
             config.rate_multiplier = 1.0;
-            config.rate_multiplier_dirty = true;
+            config.rate_multiplier_dirty.Assign(1);
         }
 
         {
-            config.simple_filter_enabled = false;
-            config.biquad_filter_enabled = false;
-            config.filters_enabled_dirty = true;
+            config.simple_filter_enabled.Assign(0);
+            config.biquad_filter_enabled.Assign(0);
+            config.filters_enabled_dirty.Assign(1);
         }
 
         {
@@ -182,18 +182,18 @@ void AudioState::initSharedMem() {
             }
             config.gain[0][0] = 1.0;
             config.gain[0][1] = 1.0;
-            config.gain_0_dirty = true;
-            config.gain_1_dirty = true;
-            config.gain_2_dirty = true;
+            config.gain_0_dirty.Assign(1);
+            config.gain_1_dirty.Assign(1);
+            config.gain_2_dirty.Assign(1);
         }
 
         {
             config.sync = 1;
-            config.sync_dirty = true;
+            config.sync_dirty.Assign(1);
         }
 
         {
-            config.reset_flag = true;
+            config.reset_flag.Assign(1);
         }
     }
 
@@ -201,25 +201,25 @@ void AudioState::initSharedMem() {
         write().dsp_configuration->volume[0] = 1.0;
         write().dsp_configuration->volume[1] = 0.0;
         write().dsp_configuration->volume[2] = 0.0;
-        write().dsp_configuration->volume_0_dirty = true;
-        write().dsp_configuration->volume_1_dirty = true;
-        write().dsp_configuration->volume_2_dirty = true;
+        write().dsp_configuration->volume_0_dirty.Assign(1);
+        write().dsp_configuration->volume_1_dirty.Assign(1);
+        write().dsp_configuration->volume_2_dirty.Assign(1);
     }
 
     {
         write().dsp_configuration->output_format = DSP::HLE::DspConfiguration::OutputFormat::Stereo;
-        write().dsp_configuration->output_format_dirty = true;
+        write().dsp_configuration->output_format_dirty.Assign(1);
     }
 
     {
         write().dsp_configuration->limiter_enabled = 0;
-        write().dsp_configuration->limiter_enabled_dirty = true;
+        write().dsp_configuration->limiter_enabled_dirty.Assign(1);
     }
 
     {
         // https://www.3dbrew.org/wiki/Configuration_Memory
         write().dsp_configuration->headphones_connected = false;
-        write().dsp_configuration->headphones_connected_dirty = true;
+        write().dsp_configuration->headphones_connected_dirty.Assign(1);
     }
 }
 

@@ -4,6 +4,9 @@
 #include <fstream>
 #include <iterator>
 #include "audio.h"
+#include "../src/matcher.h"
+#include "../src/interpreter.h"
+#include "../src/processor.h"
 #include "lle.h"
 
 // World's worst triangle wave generator.
@@ -75,15 +78,15 @@ void SourceStatus() {
         state.write().source_configurations->config[0].play_position = 0;
         state.write().source_configurations->config[0].physical_address = osConvertVirtToPhys(audio_buffer3);
         state.write().source_configurations->config[0].length = NUM_SAMPLES;
-        state.write().source_configurations->config[0].mono_or_stereo = DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Stereo;
-        state.write().source_configurations->config[0].format = DSP::HLE::SourceConfiguration::Configuration::Format::PCM16;
-        state.write().source_configurations->config[0].fade_in = false;
-        state.write().source_configurations->config[0].adpcm_dirty = false;
-        state.write().source_configurations->config[0].is_looping = false;
+        state.write().source_configurations->config[0].mono_or_stereo.Assign(DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Stereo);
+        state.write().source_configurations->config[0].format.Assign(DSP::HLE::SourceConfiguration::Configuration::Format::PCM16);
+        state.write().source_configurations->config[0].fade_in.Assign(0);
+        state.write().source_configurations->config[0].adpcm_dirty.Assign(0);
+        state.write().source_configurations->config[0].is_looping.Assign(0);
         state.write().source_configurations->config[0].buffer_id = ++buffer_id;
-        state.write().source_configurations->config[0].partial_reset_flag = true;
-        state.write().source_configurations->config[0].play_position_dirty = true;
-        state.write().source_configurations->config[0].embedded_buffer_dirty = true;
+        state.write().source_configurations->config[0].partial_reset_flag.Assign(1);
+        state.write().source_configurations->config[0].play_position_dirty.Assign(1);
+        state.write().source_configurations->config[0].embedded_buffer_dirty.Assign(1);
 
         state.write().source_configurations->config[0].buffers[next_queue_position].physical_address = osConvertVirtToPhys(buffer_id % 2 ? audio_buffer2 : audio_buffer);
         state.write().source_configurations->config[0].buffers[next_queue_position].length = NUM_SAMPLES;
@@ -92,9 +95,9 @@ void SourceStatus() {
         state.write().source_configurations->config[0].buffers[next_queue_position].buffer_id = ++buffer_id;
         state.write().source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
         next_queue_position = (next_queue_position + 1) % 4;
-        state.write().source_configurations->config[0].buffer_queue_dirty = true;
+        state.write().source_configurations->config[0].buffer_queue_dirty.Assign(1);
         state.write().source_configurations->config[0].enable = true;
-        state.write().source_configurations->config[0].enable_dirty = true;
+        state.write().source_configurations->config[0].enable_dirty.Assign(1);
 
         state.notifyDsp();
 
@@ -104,7 +107,7 @@ void SourceStatus() {
             if (!state.read().source_statuses->status[0].is_enabled) {
                 printf("%zu !\n", frame_count);
                 state.write().source_configurations->config[0].enable = true;
-                state.write().source_configurations->config[0].enable_dirty = true;
+                state.write().source_configurations->config[0].enable_dirty.Assign(1);
             }
 
             if (state.read().source_statuses->status[0].current_buffer_id_dirty) {
@@ -117,7 +120,7 @@ void SourceStatus() {
                     state.write().source_configurations->config[0].buffers[next_queue_position].buffer_id = ++buffer_id;
                     state.write().source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
                     next_queue_position = (next_queue_position + 1) % 4;
-                    state.write().source_configurations->config[0].buffer_queue_dirty = true;
+                    state.write().source_configurations->config[0].buffer_queue_dirty.Assign(1);
                 }
             }
 
@@ -148,7 +151,7 @@ void SourceStatus() {
 
         state.waitForSync();
         state.write().source_configurations->config[0].sync = 2;
-        state.write().source_configurations->config[0].sync_dirty = true;
+        state.write().source_configurations->config[0].sync_dirty.Assign(1);
         state.notifyDsp();
 
         while (true) {
@@ -226,10 +229,10 @@ void InterpLinear() {
 
         state.waitForSync();
         state.initSharedMem();
-        state.write().dsp_configuration->mixer1_enabled_dirty = true;
+        state.write().dsp_configuration->mixer1_enabled_dirty.Assign(1);
         state.write().dsp_configuration->mixer1_enabled = true;
         state.write().source_configurations->config[0].gain[1][0] = 1.0;
-        state.write().source_configurations->config[0].gain_1_dirty = true;
+        state.write().source_configurations->config[0].gain_1_dirty.Assign(1);
         state.notifyDsp();
         state.waitForSync();
         printf("init\n");
@@ -242,24 +245,24 @@ void InterpLinear() {
             state.write().source_configurations->config[0].play_position = 0;
             state.write().source_configurations->config[0].physical_address = osConvertVirtToPhys(audio_buffer);
             state.write().source_configurations->config[0].length = NUM_SAMPLES;
-            state.write().source_configurations->config[0].mono_or_stereo = DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Mono;
-            state.write().source_configurations->config[0].format = DSP::HLE::SourceConfiguration::Configuration::Format::PCM16;
-            state.write().source_configurations->config[0].fade_in = false;
-            state.write().source_configurations->config[0].adpcm_dirty = false;
-            state.write().source_configurations->config[0].is_looping = false;
+            state.write().source_configurations->config[0].mono_or_stereo.Assign(DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Mono);
+            state.write().source_configurations->config[0].format.Assign(DSP::HLE::SourceConfiguration::Configuration::Format::PCM16);
+            state.write().source_configurations->config[0].fade_in.Assign(0);
+            state.write().source_configurations->config[0].adpcm_dirty.Assign(0);
+            state.write().source_configurations->config[0].is_looping.Assign(0);
             state.write().source_configurations->config[0].buffer_id = ++buffer_id;
-            state.write().source_configurations->config[0].partial_reset_flag = true;
-            state.write().source_configurations->config[0].play_position_dirty = true;
-            state.write().source_configurations->config[0].embedded_buffer_dirty = true;
+            state.write().source_configurations->config[0].partial_reset_flag.Assign(1);
+            state.write().source_configurations->config[0].play_position_dirty.Assign(1);
+            state.write().source_configurations->config[0].embedded_buffer_dirty.Assign(1);
 
             state.write().source_configurations->config[0].enable = true;
-            state.write().source_configurations->config[0].enable_dirty = true;
+            state.write().source_configurations->config[0].enable_dirty.Assign(1);
 
             state.write().source_configurations->config[0].rate_multiplier = rate_multiplier;
-            state.write().source_configurations->config[0].rate_multiplier_dirty = true;
+            state.write().source_configurations->config[0].rate_multiplier_dirty.Assign(1);
             state.write().source_configurations->config[0].interpolation_mode = DSP::HLE::SourceConfiguration::Configuration::InterpolationMode::Linear;
             state.write().source_configurations->config[0].interpolation_related = 0;
-            state.write().source_configurations->config[0].interpolation_dirty = true;
+            state.write().source_configurations->config[0].interpolation_dirty.Assign(1);
 
             state.notifyDsp();
 
@@ -291,6 +294,15 @@ void InterpLinear() {
             printf("Done!\n");
             if (entered && passed) {
                 printf("Test passed!\n");
+                std::vector<std::pair<std::string, u32>> names;
+                auto& read_count = state.lle.teakra.GetProcessor().Interp().write_count;
+                for (const auto& [name, count] : read_count) {
+                    names.emplace_back(name, count);
+                }
+                std::ranges::sort(names, [](auto& a, auto& b) { return a.second > b.second; });
+                for (auto& [name, count] : names) {
+                    printf("%s %d\n", name.c_str(), count);
+                }
             } else {
                 printf("FAIL\n");
             }

@@ -1,7 +1,7 @@
 #include "memory_interface.h"
 #include "mmio.h"
 #include "shared_memory.h"
-
+std::unordered_map<std::string, u32> call_count;
 namespace Teakra {
 MemoryInterface::MemoryInterface(SharedMemory& shared_memory,
                                  MemoryInterfaceUnit& memory_interface_unit)

@@ -13,19 +13,19 @@ using VAddr = u32;
 struct SharedMem {
     u16* frame_counter;
 
-    volatile DSP::HLE::SourceConfiguration* source_configurations; // access through write()
-    volatile DSP::HLE::SourceStatus* source_statuses; // access through read()
-    volatile DSP::HLE::AdpcmCoefficients* adpcm_coefficients; // access through write()
+    DSP::HLE::SourceConfiguration* source_configurations; // access through write()
+    DSP::HLE::SourceStatus* source_statuses; // access through read()
+    DSP::HLE::AdpcmCoefficients* adpcm_coefficients; // access through write()
 
-    volatile DSP::HLE::DspConfiguration* dsp_configuration; // access through write()
-    volatile DSP::HLE::DspStatus* dsp_status; // access through read()
+    DSP::HLE::DspConfiguration* dsp_configuration; // access through write()
+    DSP::HLE::DspStatus* dsp_status; // access through read()
 
-    volatile DSP::HLE::FinalMixSamples* final_samples; // access through read()
-    volatile DSP::HLE::IntermediateMixSamples* intermediate_mix_samples; // access through write()
+    DSP::HLE::FinalMixSamples* final_samples; // access through read()
+    DSP::HLE::IntermediateMixSamples* intermediate_mix_samples; // access through write()
 
-    volatile DSP::HLE::Compressor* compressor; // access through write()
+    DSP::HLE::Compressor* compressor; // access through write()
 
-    volatile DSP::HLE::DspDebug* dsp_debug; // access through read()
+    DSP::HLE::DspDebug* dsp_debug; // access through read()
 };
 
 struct AudioState {

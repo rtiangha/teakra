@@ -7,5 +7,9 @@
     std::abort();
 }
 
+#ifndef ASSERT
 #define ASSERT(EXPRESSION) ((EXPRESSION) ? (void)0 : Assert(#EXPRESSION, __FILE__, __LINE__))
+#endif
+#ifndef UNREACHABLE
 #define UNREACHABLE() Assert("UNREACHABLE", __FILE__, __LINE__)
+#endif

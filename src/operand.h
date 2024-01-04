@@ -29,7 +29,7 @@ struct At {
     using FilterResult = OperandT;
     static constexpr OperandT Extract(u16 opcode, u16 expansion) {
         OperandT operand{};
-        if (NeedExpansion)
+        if constexpr (NeedExpansion)
             operand.storage = expansion;
         else
             operand.storage = (u16)((opcode & Mask) >> pos);
@@ -381,7 +381,7 @@ struct Arp : RegOperand<
     }
 };
 
-enum SwapTypeValue {
+enum class SwapTypeValue {
     a0b0,
     a0b1,
     a1b0,

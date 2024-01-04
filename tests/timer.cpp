@@ -23,8 +23,8 @@ TEST_CASE("Single mode", "[timer]") {
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == 4);
 
-    env.timer.Tick();
-    env.timer.Tick();
+    env.timer.Tick(1);
+    env.timer.Tick(1);
 
     REQUIRE(env.timer.counter_low == 3);
     REQUIRE(env.timer.counter_high == 0);
@@ -38,20 +38,20 @@ TEST_CASE("Single mode", "[timer]") {
     REQUIRE(env.timer.GetMaxSkip() == 0);
 
     env.timer.pause = 1;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 1);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
 
     env.timer.pause = 0;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 0);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.timer.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
 
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 0);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 1);
@@ -71,8 +71,8 @@ TEST_CASE("Auto restart mode", "[timer]") {
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == 0x12340004);
 
-    env.timer.Tick();
-    env.timer.Tick();
+    env.timer.Tick(1);
+    env.timer.Tick(1);
 
     REQUIRE(env.timer.counter_low == 3);
     REQUIRE(env.timer.counter_high == 0x1234);
@@ -86,20 +86,20 @@ TEST_CASE("Auto restart mode", "[timer]") {
     REQUIRE(env.timer.GetMaxSkip() == 0);
 
     env.timer.pause = 1;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 1);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
 
     env.timer.pause = 0;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 0);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.timer.GetMaxSkip() == 0x12340005);
 
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 5);
     REQUIRE(env.timer.counter_high == 0x1234);
     REQUIRE(env.interrupt_counter == 1);
@@ -128,8 +128,8 @@ TEST_CASE("Free running mode", "[timer]") {
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == 0x12340004);
 
-    env.timer.Tick();
-    env.timer.Tick();
+    env.timer.Tick(1);
+    env.timer.Tick(1);
 
     REQUIRE(env.timer.counter_low == 3);
     REQUIRE(env.timer.counter_high == 0x1234);
@@ -143,20 +143,20 @@ TEST_CASE("Free running mode", "[timer]") {
     REQUIRE(env.timer.GetMaxSkip() == 0);
 
     env.timer.pause = 1;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 1);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
 
     env.timer.pause = 0;
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 0);
     REQUIRE(env.timer.counter_high == 0);
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.timer.GetMaxSkip() == 0xFFFFFFFF);
 
-    env.timer.Tick();
+    env.timer.Tick(1);
     REQUIRE(env.timer.counter_low == 0xFFFF);
     REQUIRE(env.timer.counter_high == 0xFFFF);
     REQUIRE(env.interrupt_counter == 1);
@@ -176,7 +176,7 @@ TEST_CASE("Event counting restart mode", "[timer]") {
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.timer.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
 
-    env.timer.Tick();
+    env.timer.Tick(1);
 
     REQUIRE(env.timer.counter_low == 5);
     REQUIRE(env.timer.counter_high == 0);

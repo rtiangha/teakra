@@ -68,7 +68,7 @@ public:
         return 0;
     }
 
-    void Tick() override;
+    void Tick(u64 ticks) override;
     u64 GetMaxSkip() const override;
     void Skip(u64 ticks) override;
 

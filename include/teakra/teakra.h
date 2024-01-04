@@ -18,11 +18,14 @@ struct AHBMCallback {
     std::function<void(std::uint32_t address, std::uint32_t value)> write32;
 };
 
+class Processor;
+
 class Teakra {
 public:
     Teakra();
     ~Teakra();
 
+    Processor& GetProcessor();
     void Reset();
 
     std::array<std::uint8_t, 0x80000>& GetDspMemory();

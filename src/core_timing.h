@@ -13,15 +13,15 @@ public:
     class Callbacks {
     public:
         virtual ~Callbacks() = default;
-        virtual void Tick() = 0;
+        virtual void Tick(u64) = 0;
         virtual u64 GetMaxSkip() const = 0;
         virtual void Skip(u64) = 0;
         static constexpr u64 Infinity = std::numeric_limits<u64>::max();
     };
 
-    void Tick() {
+    void Tick(u64 ticks = 1) {
         for (const auto& callbacks : registered_callbacks) {
-            callbacks->Tick();
+            callbacks->Tick(ticks);
         }
     }
 

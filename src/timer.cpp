@@ -1,5 +1,6 @@
 #include "crash.h"
 #include "timer.h"
+#include "crash.h"
 
 namespace Teakra {
 
@@ -24,26 +25,32 @@ void Timer::Restart() {
     }
 }
 
-void Timer::Tick() {
+void Timer::Tick(u64 ticks) {
     ASSERT(static_cast<u16>(count_mode) < 4);
     ASSERT(scale == 0);
     if (pause)
         return;
     if (count_mode == CountMode::EventCount)
         return;
-    if (counter == 0) {
+    if (ticks > counter) {
+        const u16 old_counter = counter;
         if (count_mode == CountMode::AutoRestart) {
-            Restart();
+            counter = ((u32)start_high << 16) | start_low;
         } else if (count_mode == CountMode::FreeRunning) {
             counter = 0xFFFFFFFF;
-            UpdateMMIO();
+        }
+        counter -= ticks - old_counter - 1;
+        if (old_counter != 0) {
+            interrupt_handler();
         }
     } else {
-        --counter;
-        UpdateMMIO();
-        if (counter == 0)
+        counter -= ticks;
+        if (counter == 0) {
             interrupt_handler();
+        }
     }
+
+    UpdateMMIO();
 }
 
 void Timer::TickEvent() {

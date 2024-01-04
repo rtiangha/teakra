@@ -6,12 +6,21 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <xbyak/xbyak.h>
 #include "bit.h"
+#include <bit>
 #include "core_timing.h"
 #include "decoder.h"
 #include "memory_interface.h"
 #include "operand.h"
 #include "register.h"
+#include "xbyak_abi.h"
+
+using namespace Xbyak::util;
+using Xbyak::Label;
+using Xbyak::Reg16;
+using Xbyak::Reg32;
+using Xbyak::Reg64;
 
 namespace Teakra {
 
@@ -20,10 +29,44 @@ public:
     UnimplementedException() : std::runtime_error("unimplemented") {}
 };
 
-class Interpreter {
+// The following is used to alias some commonly used registers.
+
+/// XpertTeak GPRs
+/// r6 is seldom used, so we allocate its host reg to y0
+constexpr Reg64 R[] = {r8, r9, r10, r11, r12, r13, Reg64{}, r15};
+/// XpertTeak accumulators
+constexpr Reg64 A[] = {rsi, rdi};
+constexpr Reg64 B[] = {rbp, rsp};
+/// Y0 is used by firmware way more than any other factor registers
+constexpr Reg64 Y0 = r14;
+/// Holds the register structure pointer
+constexpr Reg64 REGS = rdx;
+
+struct alignas(16) StackLayout {
+    s64 cycles_remaining;
+    s64 cycles_to_run;
+};
+
+class EmitX64 : public Xbyak::CodeGenerator {
 public:
-    Interpreter(CoreTiming& core_timing, RegisterState& regs, MemoryInterface& mem)
-        : core_timing(core_timing), regs(regs), mem(mem) {}
+    EmitX64(RegisterState& regs, MemoryInterface& mem)
+        : regs(regs), mem(mem) {}
+
+    using RunCodeFuncType = void (*)();
+    RunCodeFuncType run_code{};
+
+    void EmitDispatcher() {
+        align();
+        run_code = getCurr<RunCodeFuncType>();
+
+        // This serves two purposes:
+        // 1. It saves all the registers we as a callee need to save.
+        // 2. It aligns the stack so that the code the JIT emits can assume
+        //    that the stack is appropriately aligned for CALLs.
+        ABI_PushRegistersAndAdjustStack(*this, ABI_ALL_CALLEE_SAVED, sizeof(StackLayout));
+
+
+    }
 
     void PushPC() {
         u16 l = (u16)(regs.pc & 0xFFFF);
@@ -58,94 +101,64 @@ public:
         UNREACHABLE();
     }
 
-    void CheckInterrupt() {
-        for (std::size_t i = 0; i < 3; ++i) {
-            if (interrupt_pending[i].exchange(false)) {
-                regs.ip[i] = 1;
-            }
-        }
-
-        if (vinterrupt_pending.exchange(false)) {
-            regs.ipv = 1;
-        }
-    }
-
     void Run(u64 cycles) {
-        idle = false;
-        for (u64 i = 0; i < cycles; ++i) {
-            if (idle) {
-                u64 skipped = core_timing.Skip(cycles - i - 1);
-                i += skipped;
+        u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        auto& decoder = decoders[opcode];
+        u16 expand_value = 0;
+        if (decoder.NeedExpansion()) {
+            expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        }
 
-                // Skip additional tick so to let components fire interrupts
-                if (i < cycles - 1) {
-                    ++i;
-                    core_timing.Tick();
-                }
+        if (regs.rep) {
+            if (regs.repc == 0) {
+                regs.rep = false;
+            } else {
+                --regs.repc;
+                --regs.pc;
             }
+        }
 
-            CheckInterrupt();
-
-            //std::printf("PC 0x%x\n", regs.pc);
-            u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
-            auto& decoder = decoders[opcode];
-            u16 expand_value = 0;
-            if (decoder.NeedExpansion()) {
-                expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        const u32 index = regs.bcn - 1;
+        if (regs.lp && regs.bkrep_stack[index].end == regs.pc - 1) {
+            if (regs.bkrep_stack[index].lc == 0) {
+                --regs.bcn;
+                regs.lp = regs.bcn != 0;
+            } else {
+                --regs.bkrep_stack[index].lc;
+                regs.pc = regs.bkrep_stack[index].start;
             }
+        }
 
-            if (regs.rep) {
-                if (regs.repc == 0) {
-                    regs.rep = false;
-                } else {
-                    --regs.repc;
-                    --regs.pc;
-                }
-            }
+        decoder.call(*this, opcode, expand_value);
 
-            if (regs.lp && regs.bkrep_stack[regs.bcn - 1].end + 1 == regs.pc) {
-                if (regs.bkrep_stack[regs.bcn - 1].lc == 0) {
-                    --regs.bcn;
-                    regs.lp = regs.bcn != 0;
-                } else {
-                    --regs.bkrep_stack[regs.bcn - 1].lc;
-                    regs.pc = regs.bkrep_stack[regs.bcn - 1].start;
-                }
-            }
-
-            decoder.call(*this, opcode, expand_value);
-
-            // I am not sure if a single-instruction loop is interruptable and how it is handled,
-            // so just disable interrupt for it for now.
-            if (regs.ie && !regs.rep) {
-                bool interrupt_handled = false;
-                for (u32 i = 0; i < regs.im.size(); ++i) {
-                    if (regs.im[i] && regs.ip[i]) {
-                        regs.ip[i] = 0;
-                        regs.ie = 0;
-                        PushPC();
-                        regs.pc = 0x0006 + i * 8;
-                        idle = false;
-                        interrupt_handled = true;
-                        if (regs.ic[i]) {
-                            ContextStore();
-                        }
-                        break;
-                    }
-                }
-                if (!interrupt_handled && regs.imv && regs.ipv) {
-                    regs.ipv = 0;
+        // I am not sure if a single-instruction loop is interruptable and how it is handled,
+        // so just disable interrupt for it for now.
+        if (regs.ie && !regs.rep) {
+            bool interrupt_handled = false;
+            for (u32 i = 0; i < regs.im.size(); ++i) {
+                if (regs.im[i] && regs.ip[i]) {
+                    regs.ip[i] = 0;
                     regs.ie = 0;
                     PushPC();
-                    regs.pc = vinterrupt_address;
+                    regs.pc = 0x0006 + i * 8;
                     idle = false;
-                    if (vinterrupt_context_switch) {
+                    interrupt_handled = true;
+                    if (regs.ic[i]) {
                         ContextStore();
                     }
+                    break;
                 }
             }
-
-            core_timing.Tick();
+            if (!interrupt_handled && regs.imv && regs.ipv) {
+                regs.ipv = 0;
+                regs.ie = 0;
+                PushPC();
+                regs.pc = vinterrupt_address;
+                idle = false;
+                if (vinterrupt_context_switch) {
+                    ContextStore();
+                }
+            }
         }
     }
 
@@ -711,125 +724,6 @@ public:
         ProductSum(base, c.GetName(), sub_p0, p0_align, sub_p1, p1_align);
     }
 
-    void add_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        auto [oi, oj] = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) + SignExtend<16, u64>(mem.DataRead(i));
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) + mem.DataRead(OffsetAddress(ui, i, oi));
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void add_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        auto [oi, oj] = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) + SignExtend<16, u64>(mem.DataRead(i));
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) - mem.DataRead(OffsetAddress(ui, i, oi));
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void sub_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        auto [oi, oj] = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) - SignExtend<16, u64>(mem.DataRead(i));
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) + mem.DataRead(OffsetAddress(ui, i, oi));
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void sub_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        auto [oi, oj] = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) - SignExtend<16, u64>(mem.DataRead(i));
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) - mem.DataRead(OffsetAddress(ui, i, oi));
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void add_sub_sv(ArRn1 a, ArStep1 as, Ab b) {
-        u16 u = GetArRnUnit(a);
-        auto s = GetArStep(as);
-        auto o = GetArOffset(as);
-        u16 address = RnAddressAndModify(u, s);
-        u64 high = SignExtend<16, u64>(mem.DataRead(address)) + SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(u, address, o)) - regs.sv;
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void sub_add_sv(ArRn1 a, ArStep1 as, Ab b) {
-        u16 u = GetArRnUnit(a);
-        auto s = GetArStep(as);
-        auto o = GetArOffset(as);
-        u16 address = RnAddressAndModify(u, s);
-        u64 high = SignExtend<16, u64>(mem.DataRead(address)) - SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(u, address, o)) + regs.sv;
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-    }
-    void sub_add_i_mov_j_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        OffsetValue oi;
-        std::tie(oi, std::ignore) = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(i)) - SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(ui, i, oi)) + regs.sv;
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-        regs.sv = mem.DataRead(j);
-    }
-    void sub_add_j_mov_i_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        OffsetValue oj;
-        std::tie(std::ignore, oj) = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) - SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) + regs.sv;
-        u64 result = (high << 16) | low;
-        SetAcc(b.GetName(), result);
-        regs.sv = mem.DataRead(i);
-    }
-    void add_sub_i_mov_j(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        OffsetValue oi;
-        std::tie(oi, std::ignore) = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(i)) + SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(ui, i, oi)) - regs.sv;
-        u64 result = (high << 16) | low;
-        u16 exchange = (u16)(GetAndSatAccNoFlag(b.GetName()) & 0xFFFF);
-        SetAcc(b.GetName(), result);
-        mem.DataWrite(j, exchange);
-    }
-    void add_sub_j_mov_i(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        auto [ui, uj] = GetArpRnUnit(a);
-        auto [si, sj] = GetArpStep(asi, asj);
-        OffsetValue oj;
-        std::tie(std::ignore, oj) = GetArpOffset(asi, asj);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 high = SignExtend<16, u64>(mem.DataRead(j)) + SignExtend<16, u64>(regs.sv);
-        u16 low = mem.DataRead(OffsetAddress(uj, j, oj)) - regs.sv;
-        u64 result = (high << 16) | low;
-        u16 exchange = (u16)(GetAndSatAccNoFlag(b.GetName()) & 0xFFFF);
-        SetAcc(b.GetName(), result);
-        mem.DataWrite(i, exchange);
-    }
-
     void Moda(ModaOp op, RegName a, Cond cond) {
         if (regs.ConditionPass(cond)) {
             switch (op) {
@@ -1029,14 +923,8 @@ public:
                 regs.lp = 0;
         }
     }
-    void bkreprst(ArRn2 a) {
-        RestoreBlockRepeat(regs.r[GetArRnUnit(a)]);
-    }
     void bkreprst_memsp() {
         RestoreBlockRepeat(regs.sp);
-    }
-    void bkrepsto(ArRn2 a) {
-        StoreBlockRepeat(regs.r[GetArRnUnit(a)]);
     }
     void bkrepsto_memsp() {
         StoreBlockRepeat(regs.sp);
@@ -1378,33 +1266,6 @@ public:
         ShiftBus40(value, sv, b.GetName());
     }
 
-    void tst4b(ArRn2 b, ArStep2 bs) {
-        u16 address = RnAddressAndModify(GetArRnUnit(b), GetArStep(bs));
-        u16 value = mem.DataRead(address);
-        u64 bit = GetAcc(RegName::a0) & 0xF;
-        // Is this correct? an why?
-        regs.fz = regs.fc0 = (value >> bit) & 1;
-    }
-    void tst4b(ArRn2 b, ArStep2 bs, Ax c) {
-        u64 a = GetAcc(RegName::a0);
-        u64 bit = a & 0xF;
-        u16 fv = regs.fv;
-        u16 fvl = regs.fvl;
-        u16 fm = regs.fm;
-        u16 fn = regs.fn;
-        u16 fe = regs.fe;
-        u16 sv = regs.sv;
-        ShiftBus40(a, sv, c.GetName());
-        regs.fc1 = regs.fc0;
-        regs.fv = fv;
-        regs.fvl = fvl;
-        regs.fm = fm;
-        regs.fn = fn;
-        regs.fe = fe;
-        u16 address = RnAddressAndModify(GetArRnUnit(b), GetArStep(bs));
-        u16 value = mem.DataRead(address);
-        regs.fz = regs.fc0 = (value >> bit) & 1;
-    }
     void tstb(MemImm8 a, Imm4 b) {
         u16 value = LoadFromMemory(a);
         regs.fz = (value >> b.Unsigned16()) & 1;
@@ -1506,58 +1367,6 @@ public:
     void mpyi(Imm8s x) {
         regs.x[0] = x.Signed16();
         DoMultiplication(0, true, true);
-    }
-
-    void msu(R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        u16 yi = RnAddressAndModify(y.Index(), ys.GetName());
-        u16 xi = RnAddressAndModify(x.Index(), xs.GetName());
-        u64 value = GetAcc(a.GetName());
-        u64 product = ProductToBus40(Px{0});
-        u64 result = AddSub(value, product, true);
-        SatAndSetAccAndFlag(a.GetName(), result);
-        regs.y[0] = mem.DataRead(yi);
-        regs.x[0] = mem.DataRead(xi);
-        DoMultiplication(0, true, true);
-    }
-    void msu(Rn y, StepZIDS ys, Imm16 x, Ax a) {
-        u16 yi = RnAddressAndModify(y.Index(), ys.GetName());
-        u64 value = GetAcc(a.GetName());
-        u64 product = ProductToBus40(Px{0});
-        u64 result = AddSub(value, product, true);
-        SatAndSetAccAndFlag(a.GetName(), result);
-        regs.y[0] = mem.DataRead(yi);
-        regs.x[0] = x.Unsigned16();
-        DoMultiplication(0, true, true);
-    }
-    void msusu(ArRn2 x, ArStep2 xs, Ax a) {
-        u16 xi = RnAddressAndModify(GetArRnUnit(x), GetArStep(xs));
-        u64 value = GetAcc(a.GetName());
-        u64 product = ProductToBus40(Px{0});
-        u64 result = AddSub(value, product, true);
-        SatAndSetAccAndFlag(a.GetName(), result);
-        regs.x[0] = mem.DataRead(xi);
-        DoMultiplication(0, false, true);
-    }
-    void mac_x1to0(Ax a) {
-        u64 value = GetAcc(a.GetName());
-        u64 product = ProductToBus40(Px{0});
-        u64 result = AddSub(value, product, false);
-        SatAndSetAccAndFlag(a.GetName(), result);
-        regs.x[0] = regs.x[1];
-        DoMultiplication(0, true, true);
-    }
-    void mac1(ArpRn1 xy, ArpStep1 xis, ArpStep1 yjs, Ax a) {
-        auto [ui, uj] = GetArpRnUnit(xy);
-        auto [si, sj] = GetArpStep(xis, yjs);
-        u16 i = RnAddressAndModify(ui, si);
-        u16 j = RnAddressAndModify(uj, sj);
-        u64 value = GetAcc(a.GetName());
-        u64 product = ProductToBus40(Px{1});
-        u64 result = AddSub(value, product, false);
-        SatAndSetAccAndFlag(a.GetName(), result);
-        regs.x[1] = mem.DataRead(i);
-        regs.y[1] = mem.DataRead(j);
-        DoMultiplication(1, true, true);
     }
 
     void modr(Rn a, StepZIDS as) {
@@ -1953,11 +1762,6 @@ public:
         RegFromBus16(b.GetName(), value);
     }
 
-    void mov_repc_to(ArRn1 b, ArStep1 bs) {
-        u16 address = RnAddressAndModify(GetArRnUnit(b), GetArStep(bs));
-        u16 value = regs.repc;
-        mem.DataWrite(address, value);
-    }
     void mov(ArArp a, ArRn1 b, ArStep1 bs) {
         u16 address = RnAddressAndModify(GetArRnUnit(b), GetArStep(bs));
         u16 value = RegToBus16(a.GetName());
@@ -2085,7 +1889,8 @@ public:
         mem.DataWrite(address, h);
     }
     void mova(ArRn2 a, ArStep2 as, Ab b) {
-        u16 unit = GetArRnUnit(a);
+        Reg32 unit = eax, step = ebx, offset = ecx;
+        GetArRnUnit(unit, a);
         u16 address = RnAddressAndModify(unit, GetArStep(as));
         u16 address2 = OffsetAddress(unit, address, GetArOffset(as));
         u16 l = mem.DataRead(address2);
@@ -2935,45 +2740,63 @@ public:
     }
 
 private:
-    CoreTiming& core_timing;
     RegisterState& regs;
     MemoryInterface& mem;
 
-    std::array<std::atomic<bool>, 3> interrupt_pending{{false, false, false}};
-    std::atomic<bool> vinterrupt_pending{false};
-    std::atomic<bool> vinterrupt_context_switch;
-    std::atomic<u32> vinterrupt_address;
-
-    bool idle = false;
-
-    u64 GetAcc(RegName name) const {
+    Reg64 GetAcc(RegName name) const {
         switch (name) {
         case RegName::a0:
         case RegName::a0h:
         case RegName::a0l:
         case RegName::a0e:
-            return regs.a[0];
+            return A[0];
         case RegName::a1:
         case RegName::a1h:
         case RegName::a1l:
         case RegName::a1e:
-            return regs.a[1];
+            return A[1];
         case RegName::b0:
         case RegName::b0h:
         case RegName::b0l:
         case RegName::b0e:
-            return regs.b[0];
+            return B[0];
         case RegName::b1:
         case RegName::b1h:
         case RegName::b1l:
         case RegName::b1e:
-            return regs.b[1];
+            return B[1];
         default:
             UNREACHABLE();
         }
     }
 
-    u64 SaturateAccNoFlag(u64 value) const {
+    template <typename T>
+    void SignExtend(T value, u32 bit_count) {
+        if (bit_count == 16) {
+            movsx(value, value.cvt16());
+            return;
+        }
+        if (bit_count == 32) {
+            movsx(value, value.cvt32());
+            return;
+        }
+        const u64 mask = (1ULL << bit_count) - 1;
+        const u64 bit = 1ULL << (bit_count - 1);
+        test(value, bit);
+        Xbyak::Label not_sign, end_label;
+        jz(not_sign);
+        or_(value, ~mask);
+        jmp(end_label);
+        L(not_sign);
+        and(value, mask);
+        L(end_label);
+    }
+
+    void SaturateAccNoFlag(Reg64 value) const {
+        mov(rbx, value);
+        SignExtend(rbx, 32);
+        cmp(rbx, value);
+
         if (value != SignExtend<32>(value)) {
             if ((value >> 39) != 0)
                 return 0xFFFF'FFFF'8000'0000;
@@ -2995,8 +2818,8 @@ private:
         return value;
     }
 
-    u64 GetAndSatAcc(RegName name) {
-        u64 value = GetAcc(name);
+    Reg64 GetAndSatAcc(RegName name) {
+        Reg64 value = GetAcc(name);
         if (!regs.sat) {
             return SaturateAcc(value);
         }
@@ -3011,74 +2834,131 @@ private:
         return value;
     }
 
-public:
-    std::unordered_map<std::string, u32> read_count;
+    void ConditionPass(Cond cond, auto&& func) const {
+        Xbyak::Label end_cond;
+        switch (cond.GetName()) {
+        case CondValue::True:
+            func();
+            return;
+        case CondValue::Eq:
+            mov(ax, word[REGS + offsetof(RegisterState, fz)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::Neq:
+            mov(ax, word[REGS + offsetof(RegisterState, fz)]);
+            test(ax, ax);
+            jne(end_cond);
+            break;
+        case CondValue::Gt:
+            // Load fz and fm together as a u32
+            static_assert(offsetof(RegisterState, fz) + sizeof(u16) == offsetof(RegisterState, fm));
+            mov(eax, dword[REGS + offsetof(RegisterState, fz)]);
+            test(eax, eax);
+            jne(end_cond);
+            break;
+        case CondValue::Ge:
+            mov(ax, word[REGS + offsetof(RegisterState, fm)]);
+            test(ax, ax);
+            jne(end_cond);
+            break;
+        case CondValue::Lt:
+            mov(ax, word[REGS + offsetof(RegisterState, fm)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::Le:
+            // Load fz and fm together as a u32
+            mov(eax, dword[REGS + offsetof(RegisterState, fz)]);
+            test(eax, eax);
+            je(end_cond);
+            break;
+        case CondValue::Nn:
+            mov(ax, word[REGS + offsetof(RegisterState, fn)]);
+            test(ax, ax);
+            jne(end_cond);
+            break;
+        case CondValue::C:
+            mov(ax, word[REGS + offsetof(RegisterState, fc0)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::V:
+            mov(ax, word[REGS + offsetof(RegisterState, fv)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::E:
+            mov(ax, word[REGS + offsetof(RegisterState, fe)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::L:
+            // Load flm and fvl together as a u32
+            static_assert(offsetof(RegisterState, flm) + sizeof(u16) == offsetof(RegisterState, fvl));
+            mov(eax, dword[REGS + offsetof(RegisterState, flm)]);
+            test(eax, eax);
+            je(end_cond);
+            break;
+        case CondValue::Nr:
+            mov(ax, word[REGS + offsetof(RegisterState, fr)]);
+            test(ax, ax);
+            jne(end_cond);
+            break;
+        case CondValue::Niu0:
+            mov(ax, word[REGS + offsetof(RegisterState, iu)]);
+            test(ax, ax);
+            jne(end_cond);
+            break;
+        case CondValue::Iu0:
+            mov(ax, word[REGS + offsetof(RegisterState, iu)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        case CondValue::Iu1:
+            mov(ax, word[REGS + offsetof(RegisterState, iu) + sizeof(u16)]);
+            cmp(ax, 1);
+            jne(end_cond);
+            break;
+        default:
+            UNREACHABLE();
+        }
+        func();
+        L(end_cond);
+    }
 
-    u16 RegToBus16(RegName reg, bool enable_sat_for_mov = false) {
+    Reg16 RegToBus16(RegName reg, bool enable_sat_for_mov = false) {
         switch (reg) {
         case RegName::a0:
-            read_count["a0"]++;
-            return GetAcc(reg) & 0xFFFF;
         case RegName::a1:
-            read_count["a1"]++;
-            return GetAcc(reg) & 0xFFFF;
         case RegName::b0:
-            read_count["b0"]++;
-            return GetAcc(reg) & 0xFFFF;
         case RegName::b1:
             // get aXl, but unlike using RegName::aXl, this does never saturate.
             // This only happen to insturctions using "Register" operand,
             // and doesn't apply to all instructions. Need test and special check.
-            read_count["b1"]++;
-            return GetAcc(reg) & 0xFFFF;
+            mov(ax, GetAcc(reg).cvt16());
+            break;
         case RegName::a0l:
-            read_count["a0l"]++;
-            if (enable_sat_for_mov) {
-                return GetAndSatAcc(reg) & 0xFFFF;
-            }
-            return GetAcc(reg) & 0xFFFF;
         case RegName::a1l:
-            read_count["a1l"]++;
-            if (enable_sat_for_mov) {
-                return GetAndSatAcc(reg) & 0xFFFF;
-            }
-            return GetAcc(reg) & 0xFFFF;
         case RegName::b0l:
-            read_count["b0l"]++;
-            if (enable_sat_for_mov) {
-                return GetAndSatAcc(reg) & 0xFFFF;
-            }
-            return GetAcc(reg) & 0xFFFF;
         case RegName::b1l:
-            read_count["b1l"]++;
             if (enable_sat_for_mov) {
-                return GetAndSatAcc(reg) & 0xFFFF;
+                mov(ax, GetAndSatAcc(reg).cvt16());
+            } else {
+                mov(ax, GetAcc(reg).cvt16());
             }
-            return GetAcc(reg) & 0xFFFF;
+            break;
         case RegName::a0h:
-            read_count["a0h"]++;
-            if (enable_sat_for_mov) {
-                return (GetAndSatAcc(reg) >> 16) & 0xFFFF;
-            }
-            return (GetAcc(reg) >> 16) & 0xFFFF;
         case RegName::a1h:
-            read_count["a1h"]++;
-            if (enable_sat_for_mov) {
-                return (GetAndSatAcc(reg) >> 16) & 0xFFFF;
-            }
-            return (GetAcc(reg) >> 16) & 0xFFFF;
         case RegName::b0h:
-            read_count["b0h"]++;
-            if (enable_sat_for_mov) {
-                return (GetAndSatAcc(reg) >> 16) & 0xFFFF;
-            }
-            return (GetAcc(reg) >> 16) & 0xFFFF;
         case RegName::b1h:
-            read_count["b1h"]++;
             if (enable_sat_for_mov) {
-                return (GetAndSatAcc(reg) >> 16) & 0xFFFF;
+                mov(eax, GetAndSatAcc(reg).cvt32());
+            } else {
+                mov(eax, GetAcc(reg).cvt32());
             }
-            return (GetAcc(reg) >> 16) & 0xFFFF;
+            shr(eax, 16);
+            break;
         case RegName::a0e:
         case RegName::a1e:
         case RegName::b0e:
@@ -3086,126 +2966,104 @@ public:
             UNREACHABLE();
 
         case RegName::r0:
-            read_count["r0"]++;
-            return regs.r[0];
+            mov(ax, R[0]);
+            break;
         case RegName::r1:
-            read_count["r1"]++;
-            return regs.r[1];
+            mov(ax, R[1]);
+            break;
         case RegName::r2:
-            read_count["r2"]++;
-            return regs.r[2];
+            mov(ax, R[2]);
+            break;
         case RegName::r3:
-            read_count["r3"]++;
-            return regs.r[3];
+            mov(ax, R[3]);
+            break;
         case RegName::r4:
-            read_count["r4"]++;
-            return regs.r[4];
+            mov(ax, R[4]);
+            break;
         case RegName::r5:
-            read_count["r5"]++;
-            return regs.r[5];
+            mov(ax, R[5]);
+            break;
         case RegName::r6:
-            read_count["r6"]++;
-            return regs.r[6];
+            // R6 is very rarely used, it would be a waste to assign a register to it
+            mov(ax, word[REGS + offsetof(RegisterState, r[6])]);
+            break;
         case RegName::r7:
-            read_count["r7"]++;
-            return regs.r[7];
+            mov(ax, R[7]);
+            break;
 
         case RegName::y0:
-            read_count["y0"]++;
-            return regs.y[0];
+            mov(ax, Y0);
+            break;
         case RegName::p:
             // This only happen to insturctions using "Register" operand,
             // and doesn't apply to all instructions. Need test and special check.
-            read_count["p"]++;
             return (ProductToBus40(Px{0}) >> 16) & 0xFFFF;
 
         case RegName::pc:
             UNREACHABLE();
         case RegName::sp:
-            read_count["sp"]++;
-            return regs.sp;
+            mov(ax, word[REGS + offsetof(RegisterState, sp)]);
+            break;
         case RegName::sv:
-            read_count["sv"]++;
-            return regs.sv;
+            mov(ax, word[REGS + offsetof(RegisterState, sv)]);
+            break;
         case RegName::lc:
-            read_count["lc"]++;
             return regs.Lc();
 
         case RegName::ar0:
-            read_count["ar0"]++;
             return regs.Get<ar0>();
         case RegName::ar1:
-            read_count["ar1"]++;
             return regs.Get<ar1>();
 
         case RegName::arp0:
-            read_count["arp0"]++;
             return regs.Get<arp0>();
         case RegName::arp1:
-            read_count["arp1"]++;
             return regs.Get<arp1>();
         case RegName::arp2:
-            read_count["arp2"]++;
             return regs.Get<arp2>();
         case RegName::arp3:
-            read_count["arp3"]++;
             return regs.Get<arp3>();
 
         case RegName::ext0:
-            read_count["ext0"]++;
             return regs.ext[0];
         case RegName::ext1:
-            read_count["ext1"]++;
             return regs.ext[1];
         case RegName::ext2:
-            read_count["ext2"]++;
             return regs.ext[2];
         case RegName::ext3:
-            read_count["ext3"]++;
             return regs.ext[3];
 
         case RegName::stt0:
-            read_count["stt0"]++;
             return regs.Get<stt0>();
         case RegName::stt1:
-            read_count["stt1"]++;
             return regs.Get<stt1>();
         case RegName::stt2:
-            read_count["stt2"]++;
             return regs.Get<stt2>();
 
         case RegName::st0:
-            read_count["st0"]++;
-            return regs.Get<st0>();
+            return regs.Get<Teakra::st0>();
         case RegName::st1:
-            read_count["st1"]++;
-            return regs.Get<st1>();
+            return regs.Get<Teakra::st1>();
         case RegName::st2:
-            read_count["st2"]++;
-            return regs.Get<st2>();
+            return regs.Get<Teakra::st2>();
 
         case RegName::cfgi:
-            read_count["cfgi"]++;
             return regs.Get<cfgi>();
         case RegName::cfgj:
-            read_count["cfgj"]++;
             return regs.Get<cfgj>();
 
         case RegName::mod0:
-            read_count["mod0"]++;
             return regs.Get<mod0>();
         case RegName::mod1:
-            read_count["mod1"]++;
             return regs.Get<mod1>();
         case RegName::mod2:
-            read_count["mod2"]++;
             return regs.Get<mod2>();
         case RegName::mod3:
-            read_count["mod3"]++;
             return regs.Get<mod3>();
         default:
             UNREACHABLE();
         }
+        return ax;
     }
 
     void SetAccFlag(u64 value) {
@@ -3217,31 +3075,31 @@ public:
         regs.fn = regs.fz || (!regs.fe && (bit31 ^ bit30) != 0);
     }
 
-    void SetAcc(RegName name, u64 value) {
+    void SetAcc(RegName name, Reg64 value) {
         switch (name) {
         case RegName::a0:
         case RegName::a0h:
         case RegName::a0l:
         case RegName::a0e:
-            regs.a[0] = value;
+            mov(A[0], value);
             break;
         case RegName::a1:
         case RegName::a1h:
         case RegName::a1l:
         case RegName::a1e:
-            regs.a[1] = value;
+            mov(A[1], value);
             break;
         case RegName::b0:
         case RegName::b0h:
         case RegName::b0l:
         case RegName::b0e:
-            regs.b[0] = value;
+            mov(B[0], value);
             break;
         case RegName::b1:
         case RegName::b1h:
         case RegName::b1l:
         case RegName::b1e:
-            regs.b[1] = value;
+            mov(B[1], value);
             break;
         default:
             UNREACHABLE();
@@ -3260,24 +3118,13 @@ public:
         SetAccFlag(value);
         SetAcc(name, value);
     }
-    std::unordered_map<std::string, u32> write_count;
 
     void RegFromBus16(RegName reg, u16 value) {
         switch (reg) {
         case RegName::a0:
-            write_count["a0"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<16, u64>(value));
-            break;
         case RegName::a1:
-            write_count["a1"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<16, u64>(value));
-            break;
         case RegName::b0:
-            write_count["b0"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<16, u64>(value));
-            break;
         case RegName::b1:
-            write_count["b1"]++;
             SatAndSetAccAndFlag(reg, SignExtend<16, u64>(value));
             break;
         case RegName::a0l:
@@ -3287,19 +3134,9 @@ public:
             SatAndSetAccAndFlag(reg, (u64)value);
             break;
         case RegName::a0h:
-            write_count["a0h"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<32, u64>(value << 16));
-            break;
         case RegName::a1h:
-            write_count["a1h"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<32, u64>(value << 16));
-            break;
         case RegName::b0h:
-            write_count["b0h"]++;
-            SatAndSetAccAndFlag(reg, SignExtend<32, u64>(value << 16));
-            break;
         case RegName::b1h:
-            write_count["b1h"]++;
             SatAndSetAccAndFlag(reg, SignExtend<32, u64>(value << 16));
             break;
         case RegName::a0e:
@@ -3309,44 +3146,34 @@ public:
             UNREACHABLE();
 
         case RegName::r0:
-            write_count["r0"]++;
             regs.r[0] = value;
             break;
         case RegName::r1:
-            write_count["r1"]++;
             regs.r[1] = value;
             break;
         case RegName::r2:
-            write_count["r2"]++;
             regs.r[2] = value;
             break;
         case RegName::r3:
-            write_count["r3"]++;
             regs.r[3] = value;
             break;
         case RegName::r4:
-            write_count["r4"]++;
             regs.r[4] = value;
             break;
         case RegName::r5:
-            write_count["r5"]++;
             regs.r[5] = value;
             break;
         case RegName::r6:
-            write_count["r6"]++;
             regs.r[6] = value;
             break;
         case RegName::r7:
-            write_count["r7"]++;
             regs.r[7] = value;
             break;
 
         case RegName::y0:
-            write_count["y0"]++;
             regs.y[0] = value;
             break;
         case RegName::p: // p0h
-            write_count["p"]++;
             regs.pe[0] = value > 0x7FFF;
             regs.p[0] = (regs.p[0] & 0xFFFF) | (value << 16);
             break;
@@ -3354,41 +3181,32 @@ public:
         case RegName::pc:
             UNREACHABLE();
         case RegName::sp:
-            write_count["sp"]++;
             regs.sp = value;
             break;
         case RegName::sv:
-            write_count["sv"]++;
             regs.sv = value;
             break;
         case RegName::lc:
-            write_count["lc"]++;
             regs.Lc() = value;
             break;
 
         case RegName::ar0:
-            write_count["ar0"]++;
             regs.Set<ar0>(value);
             break;
         case RegName::ar1:
-            write_count["ar1"]++;
             regs.Set<ar1>(value);
             break;
 
         case RegName::arp0:
-            write_count["arp0"]++;
             regs.Set<arp0>(value);
             break;
         case RegName::arp1:
-            write_count["arp1"]++;
             regs.Set<arp1>(value);
             break;
         case RegName::arp2:
-            write_count["arp2"]++;
             regs.Set<arp2>(value);
             break;
         case RegName::arp3:
-            write_count["arp3"]++;
             regs.Set<arp3>(value);
             break;
 
@@ -3406,54 +3224,42 @@ public:
             break;
 
         case RegName::stt0:
-            write_count["stt0"]++;
             regs.Set<stt0>(value);
             break;
         case RegName::stt1:
-            write_count["stt1"]++;
             regs.Set<stt1>(value);
             break;
         case RegName::stt2:
-            write_count["stt2"]++;
             regs.Set<stt2>(value);
             break;
 
         case RegName::st0:
-            write_count["st0"]++;
-            regs.Set<st0>(value);
+            regs.Set<Teakra::st0>(value);
             break;
         case RegName::st1:
-            write_count["st1"]++;
-            regs.Set<st1>(value);
+            regs.Set<Teakra::st1>(value);
             break;
         case RegName::st2:
-            write_count["st2"]++;
-            regs.Set<st2>(value);
+            regs.Set<Teakra::st2>(value);
             break;
 
         case RegName::cfgi:
-            write_count["cfgi"]++;
             regs.Set<cfgi>(value);
             break;
         case RegName::cfgj:
-            write_count["cfgj"]++;
             regs.Set<cfgj>(value);
             break;
 
         case RegName::mod0:
-            write_count["mod0"]++;
             regs.Set<mod0>(value);
             break;
         case RegName::mod1:
-            write_count["mod1"]++;
             regs.Set<mod1>(value);
             break;
         case RegName::mod2:
-            write_count["mod2"]++;
             regs.Set<mod2>(value);
             break;
         case RegName::mod3:
-            write_count["mod3"]++;
             regs.Set<mod3>(value);
             break;
         default:
@@ -3462,9 +3268,9 @@ public:
     }
 
     template <typename ArRnX>
-    u16 GetArRnUnit(ArRnX arrn) const {
+    void GetArRnUnit(Reg32& out, ArRnX arrn) const {
         static_assert(std::is_same_v<ArRnX, ArRn1> || std::is_same_v<ArRnX, ArRn2>);
-        return regs.arrn[arrn.Index()];
+        mov(out, dword[REGS + offsetof(RegisterState, arrn) + arrn * sizeof(arrn[0])]);
     }
 
     template <typename ArpRnX>
@@ -3542,6 +3348,59 @@ public:
         return RnAddress(unit, RnAndModify(unit, step, dmod));
     }
 
+    void DoOffsetAddress(u32 unit, Reg16 address, OffsetValue offset, bool emod) {
+        ASSERT(address == ax);
+        if (offset == OffsetValue::Zero) {
+            ret();
+            return;
+        }
+        if (offset == OffsetValue::MinusOneDmod) {
+            sub(address, 1);
+            ret();
+            return;
+        }
+        if (offset == OffsetValue::PlusOne && !emod) {
+            add(address, 1);
+            ret();
+            return;
+        }
+        if (offset == OffsetValue::MinusOne && !emod) {
+            sub(address, 1);
+            ret();
+            return;
+        }
+        const u32 offset = unit < 4 ? offsetof(RegisterState, modi) : offsetof(RegisterState, modj);
+        const Reg16 mod = bx;
+        mov(mod, word[REGS + offset]);
+        const Reg16 mask = cx;
+        mov(mask, 1); // mod = 0 still have one bit mask
+        for (u32 i = 0; i < 9; ++i) {
+            or_(mask, mod);
+            shr(mod, 1);
+        }
+        if (offset == OffsetValue::PlusOne) {
+            Xbyak::Label not_equal;
+            mov(dx, address);
+            and_(dx, mask);
+            cmp(dx, mod);
+            jne(not_equal);
+            not_(mask);
+            and_(address, mask);
+            ret();
+            L(not_equal);
+            add(address, 1);
+            ret();
+            return address + 1;
+        } else { // OffsetValue::MinusOne
+            throw UnimplementedException();
+            // TODO: sometimes this would return two addresses,
+            // neither of which is the original Rn value.
+            // This only happens for memory writing, but not for memory reading.
+            // Might be some undefined behaviour.
+            ASSERT(false);
+        }
+    }
+
     u16 OffsetAddress(unsigned unit, u16 address, OffsetValue offset, bool dmod = false) {
         if (offset == OffsetValue::Zero)
             return address;
@@ -3572,6 +3431,243 @@ public:
                 return address | mod;
             return address - 1;
         }
+    }
+
+
+    void DoPulseStepAddress(u32 unit, Reg32 address, StepValue step, bool legacy,
+                            bool br, bool m, bool stp16, bool dmod = false) {
+        ASSERT(address == eax);
+        const Reg16 s = bx;
+
+        const auto sign_extend_s = [&](u32 bits) {
+            const bool sign_bit = ((value >> (bit_count - 1)) & 1) != 0;
+            if (sign_bit) {
+                return value | ~mask;
+            }
+            // value & mask;
+        };
+
+        if (br && !m) {
+            const u32 offset = unit < 4 ? offsetof(RegisterState, stepi0) : offsetof(RegisterState, stepj0);
+            mov(s, word[REGS + offset]);
+        } else {
+            const u32 offset = unit < 4 ? offsetof(RegisterState, stepi) : offsetof(RegisterState, stepj);
+            mov(s, word[REGS + offset]);
+            sign_extend_s(7);
+        }
+        if (stp16 == 1 && !legacy) {
+            const u32 offset = unit < 4 ? offsetof(RegisterState, stepi0) : offsetof(RegisterState, stepj0);
+            mov(s, word[REGS + offset]);
+            if (m) {
+                sign_extend_s(9);
+            }
+        }
+
+        Xbyak::Label return_label;
+        test(s, s);
+        je(return_label);
+
+        if (!dmod && !br && m) {
+            const u32 offset = unit < 4 ? offsetof(RegisterState, modi) : offsetof(RegisterState, modj);
+            const Reg16 mod = cx;
+            mov(mod, word[REGS + offset]);
+            test(mod, mod);
+            je(return_label); // if (mod == 0) return address;
+
+            if (step2_mode2) {
+                cmp(mod, 1);
+                je(return_label); // if (mod == 1) return address;
+            }
+
+            u32 iteration = 1;
+            if (step2_mode1) {
+                iteration = 2;
+                shr(s, 1); // s >>= 1;
+                sign_extend_s(15); // s = SignExtend<15>(s);
+            }
+
+            if (legacy || step2_mode2) {
+                const Reg16 m = dx;
+                if (s >> 15) {
+                    for (u32 i = 0; i < iteration; ++i) {
+                        mov(m, mod);
+                        not_(s);
+                        or_(m, s); // m |= ~s;
+                        not_(s); // s = ~s;
+                        u16 mask = (1 << std::bit_width(m)) - 1;
+                        address &= ~mask;
+                        if ((address & mask) == 0 && (!step2_mode2 || mod != mask)) {
+                            address |= mod;
+                        } else {
+                            address |= (address + s) & mask;
+                        }
+                        address &= ~mask;
+                    }
+                } else {
+                    for (u32 i = 0; i < iteration; ++i) {
+                        mov(m, mod);
+                        m |= s;
+                        u16 mask = (1 << std::bit_width(m)) - 1;
+                        address &= ~mask;
+                        if ((address & mask) == mod && (!step2_mode2 || mod != mask)) {
+                            address |= 0;
+                        } else {
+                            address |= (address + s) & mask;
+                        }
+                    }
+                }
+            } else {
+                for (u32 i = 0; i < iteration; ++i) {
+                    u16 mask = (1 << std::bit_width(mod)) - 1;
+                    address &= ~mask;
+                    if (s < 0x8000) {
+                        next = (address + s) & mask;
+                        if (next == ((mod + 1) & mask)) {
+                            next = 0;
+                        }
+                    } else {
+                        next = address & mask;
+                        if (next == 0) {
+                            next = mod + 1;
+                        }
+                        next += s;
+                        next &= mask;
+                    }
+                    address |= next;
+                }
+            }
+        } else {
+            add(address, s);
+        }
+        L(return_label);
+        ret();
+    }
+
+    void DoStepAddress(u32 unit, Reg32 address, StepValue step, bool legacy,
+                      bool br, bool m, bool stp16, bool dmod = false) {
+        u16 s;
+        bool step2_mode1 = false;
+        bool step2_mode2 = false;
+        switch (step) {
+        case StepValue::Zero:
+            return;
+        case StepValue::Increase:
+            s = 1;
+            break;
+        case StepValue::Decrease:
+            s = 0xFFFF;
+            break;
+        // TODO: Increase/Decrease2Mode1/2 sometimes have wrong result if Offset=+/-1.
+        // This however never happens with modr instruction.
+        case StepValue::Increase2Mode1:
+            s = 2;
+            step2_mode1 = !legacy;
+            break;
+        case StepValue::Decrease2Mode1:
+            s = 0xFFFE;
+            step2_mode1 = !legacy;
+            break;
+        case StepValue::Increase2Mode2:
+            s = 2;
+            step2_mode2 = !legacy;
+            break;
+        case StepValue::Decrease2Mode2:
+            s = 0xFFFE;
+            step2_mode2 = !legacy;
+            break;
+        case StepValue::PlusStep: {
+            return DoPulseStepAddress(unit, address, step, legacy, br, m, stp16, dmod);
+        }
+        default:
+            UNREACHABLE();
+        }
+
+        Xbyak::Label return_label;
+
+        if (!dmod && !br && m) {
+            const u32 offset = unit < 4 ? offsetof(RegisterState, modi) : offsetof(RegisterState, modj);
+            const Reg16 mod = bx;
+            mov(mod, word[REGS + offset]);
+            cmp(mod, 0);
+            je(return_label);
+
+            if (step2_mode2) {
+                cmp(mod, 1);
+                je(return_label);
+            }
+
+            u32 iteration = 1;
+            if (step2_mode1) {
+                iteration = 2;
+                s = SignExtend<15, u16>(s >> 1);
+            }
+
+            for (u32 i = 0; i < iteration; ++i) {
+                if (legacy || step2_mode2) {
+                    bool negative = false;
+                    const Reg16 m = cx;
+                    mov(m, mod);
+                    if (s >> 15) {
+                        negative = true;
+                        or_(m, ~s);
+                    } else {
+                        or_(m, s);
+                    }
+
+                    const Reg16 mask = dx;
+                    // We know m != 0 so don't have to check for it.
+                    bsr(m, m);
+                    lea(m, ptr[m + 1]); // m = std::bit_width(m);
+                    mov(mask, 1);
+                    sal(mask, m);
+                    sub_(mask, 1); // u16 mask = (1 << m) - 1;
+
+                    // m is no longer needed so we can use it as scratch
+                    const Reg32 scratch = m.cvt32();
+                    mov(scratch, address);
+                    and_(scratch, mask); // scratch = address & mask
+
+                    Xbyak::Label do_step, end_step;
+                    if (!negative) {
+                        if ((address & mask) == mod && (!step2_mode2 || mod != mask)) {
+                        } else {
+                            address |= (address + s) & mask;
+                        }
+                    } else {
+                        if ((address & mask) == 0 && (!step2_mode2 || mod != mask)) {
+                            address |= mod;
+                        } else {
+                            address |= (address + s) & mask;
+                        }
+                    }
+                    L(end_step);
+                    not_(mask);
+                    and_(address, mask); // address &= ~mask;
+                } else {
+                    u16 mask = (1 << std20::log2p1(mod)) - 1;
+                    u16 next;
+                    if (s < 0x8000) {
+                        next = (address + s) & mask;
+                        if (next == ((mod + 1) & mask)) {
+                            next = 0;
+                        }
+                    } else {
+                        next = address & mask;
+                        if (next == 0) {
+                            next = mod + 1;
+                        }
+                        next += s;
+                        next &= mask;
+                    }
+                    address &= ~mask;
+                    address |= next;
+                }
+            }
+        } else {
+            address += s;
+        }
+        L(return_label);
+        ret();
     }
 
     u16 StepAddress(unsigned unit, u16 address, StepValue step, bool dmod = false) {
@@ -3628,6 +3724,7 @@ public:
 
         if (s == 0)
             return address;
+
         if (!dmod && !regs.br[unit] && regs.m[unit]) {
             u16 mod = unit < 4 ? regs.modi : regs.modj;
 
@@ -3699,9 +3796,7 @@ public:
         return address;
     }
 
-    std::vector<u64> values;
-
-    u16 RnAndModify(unsigned unit, StepValue step, bool dmod = false) {
+    u16 RnAndModify(u32 unit, StepValue step, bool dmod = false) {
         u16 ret = regs.r[unit];
         if ((unit == 3 && regs.epi) || (unit == 7 && regs.epj)) {
             if (step != StepValue::Increase2Mode1 && step != StepValue::Decrease2Mode1 &&
@@ -3749,19 +3844,19 @@ public:
 
     static RegName CounterAcc(RegName in) {
         static std::unordered_map<RegName, RegName> map{
-            {RegName::a0, RegName::a1},   {RegName::a1, RegName::a0},
-            {RegName::b0, RegName::b1},   {RegName::b1, RegName::b0},
-            {RegName::a0l, RegName::a1l}, {RegName::a1l, RegName::a0l},
-            {RegName::b0l, RegName::b1l}, {RegName::b1l, RegName::b0l},
-            {RegName::a0h, RegName::a1h}, {RegName::a1h, RegName::a0h},
-            {RegName::b0h, RegName::b1h}, {RegName::b1h, RegName::b0h},
-            {RegName::a0e, RegName::a1e}, {RegName::a1e, RegName::a0e},
-            {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
-        };
+                                                        {RegName::a0, RegName::a1},   {RegName::a1, RegName::a0},
+                                                        {RegName::b0, RegName::b1},   {RegName::b1, RegName::b0},
+                                                        {RegName::a0l, RegName::a1l}, {RegName::a1l, RegName::a0l},
+                                                        {RegName::b0l, RegName::b1l}, {RegName::b1l, RegName::b0l},
+                                                        {RegName::a0h, RegName::a1h}, {RegName::a1h, RegName::a0h},
+                                                        {RegName::b0h, RegName::b1h}, {RegName::b1h, RegName::b0h},
+                                                        {RegName::a0e, RegName::a1e}, {RegName::a1e, RegName::a0e},
+                                                        {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
+                                                        };
         return map.at(in);
     }
 
-    const std::vector<Matcher<Interpreter>> decoders = GetDecoderTable<Interpreter>();
+    const std::vector<Matcher<EmitX64>> decoders = GetDecoderTable<EmitX64>();
 };
 
 } // namespace Teakra

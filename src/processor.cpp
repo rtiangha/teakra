@@ -24,6 +24,10 @@ void Processor::Run(unsigned cycles) {
     impl->interpreter.Run(cycles);
 }
 
+Interpreter& Processor::Interp() {
+    return impl->interpreter;
+}
+
 void Processor::SignalInterrupt(u32 i) {
     impl->interpreter.SignalInterrupt(i);
 }

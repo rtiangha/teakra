@@ -44,7 +44,7 @@ TEST_CASE("Btdmp queueing", "[btdmp]") {
     REQUIRE(env.btdmp.GetTransmitEmpty());
     REQUIRE(!env.btdmp.GetTransmitFull());
 
-    env.btdmp.Tick();
+    env.btdmp.Tick(1);
     REQUIRE(env.interrupt_counter == 0);
     REQUIRE(env.btdmp.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
     REQUIRE(env.sample_queue.size() == 1);
@@ -86,7 +86,7 @@ TEST_CASE("Btdmp queueing", "[btdmp]") {
     REQUIRE(!env.btdmp.GetTransmitEmpty());
     REQUIRE(!env.btdmp.GetTransmitFull());
 
-    env.btdmp.Tick();
+    env.btdmp.Tick(1);
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.btdmp.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
     REQUIRE(env.sample_queue.size() == 1);
@@ -130,7 +130,7 @@ TEST_CASE("Btdmp queueing", "[btdmp]") {
     REQUIRE(env.btdmp.GetTransmitFull());
 
     for (int i = 0; i < 4567; ++i) {
-        env.btdmp.Tick();
+        env.btdmp.Tick(1);
     }
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.btdmp.GetMaxSkip() == 1000 * 8 - 600 - 1 - 4567);
@@ -145,7 +145,7 @@ TEST_CASE("Btdmp queueing", "[btdmp]") {
     REQUIRE(!env.btdmp.GetTransmitEmpty());
     REQUIRE(!env.btdmp.GetTransmitFull());
 
-    env.btdmp.Tick();
+    env.btdmp.Tick(1);
     REQUIRE(env.interrupt_counter == 1);
     REQUIRE(env.btdmp.GetMaxSkip() == 999);
     REQUIRE(env.sample_queue.size() == 7);
@@ -181,7 +181,7 @@ TEST_CASE("Btdmp queueing", "[btdmp]") {
     REQUIRE(!env.btdmp.GetTransmitEmpty());
     REQUIRE(!env.btdmp.GetTransmitFull());
 
-    env.btdmp.Tick();
+    env.btdmp.Tick(1);
     REQUIRE(env.interrupt_counter == 2);
     REQUIRE(env.btdmp.GetMaxSkip() == Teakra::CoreTiming::Callbacks::Infinity);
     REQUIRE(env.sample_queue.size() == 1);

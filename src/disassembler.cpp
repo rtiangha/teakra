@@ -1286,10 +1286,10 @@ public:
         return D("mov", MemARS(a, as), R(b));
     }
     std::vector<std::string> mova(Ab a, ArRn2 b, ArStep2 bs) {
-        return D("mov", R(a), MemARS(b, bs));
+        return D("mova", R(a), MemARS(b, bs));
     }
     std::vector<std::string> mova(ArRn2 a, ArStep2 as, Ab b) {
-        return D("mov", MemARS(a, as), R(b));
+        return D("mova", MemARS(a, as), R(b));
     }
 
     std::vector<std::string> mov_r6_to(Bx b) {

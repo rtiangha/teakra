@@ -42,9 +42,9 @@ TEST_CASE("Cycle accuracy", "[interpreter]") {
             counter = new_counter;
         }
 
-        void Tick() override {
+        void Tick(u64 ticks) override {
             if (counter != 0) {
-                --counter;
+                counter -= ticks;
                 if (counter == 0) {
                     interpreter.SignalInterrupt(0);
                 }

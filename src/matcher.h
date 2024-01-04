@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <functional>
 #include <vector>
+#include <sstream>
+#include <string>
+#include <unordered_map>
 #include "common_types.h"
 #include "crash.h"
 
@@ -14,6 +17,8 @@ struct Rejector {
     }
 };
 
+extern std::unordered_map<std::string, u32> call_count;
+
 template <typename Visitor>
 class Matcher {
 public:
@@ -22,7 +27,11 @@ public:
     using handler_function = std::function<handler_return_type(Visitor&, u16, u16)>;
 
     Matcher(const char* const name, u16 mask, u16 expected, bool expanded, handler_function func)
-        : name{name}, mask{mask}, expected{expected}, expanded{expanded}, fn{std::move(func)} {}
+        : name{name}, mask{mask}, expected{expected}, expanded{expanded}, fn{std::move(func)} {
+        std::stringstream stream;
+        stream << name << " 0x" << std::hex << expected;
+        identifier = stream.str();
+    }
 
     static Matcher AllMatcher(handler_function func) {
         return Matcher("*", 0, 0, false, std::move(func));
@@ -52,6 +61,7 @@ public:
 
     handler_return_type call(Visitor& v, u16 instruction, u16 instruction_expansion = 0) const {
         ASSERT(Matches(instruction));
+        call_count[identifier]++;
         return fn(v, instruction, instruction_expansion);
     }
 
@@ -60,6 +70,7 @@ private:
     u16 mask;
     u16 expected;
     bool expanded;
+    std::string identifier;
     handler_function fn;
     std::vector<Rejector> rejectors;
 };

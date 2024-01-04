@@ -7,11 +7,11 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "bit_field.h"
+#include "../src/bit_field.h"
 #include "common_funcs.h"
 #include "audio_types.h"
 #include "../src/common_types.h"
-#include "swap.h"
+#include "../src/swap.h"
 
 using VAddr = u32;
 
