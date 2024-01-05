@@ -269,6 +269,13 @@ public:
     }
 
     void DoMultiplication(u32 unit, bool x_sign, bool y_sign) {
+        if (unit == 0) {
+            read_count["x0"]++;
+            read_count["y0"]++;
+        } else {
+            read_count["x1"]++;
+            read_count["y1"]++;
+        }
         u32 x = regs.x[unit];
         u32 y = regs.y[unit];
         if (regs.hwm == 1 || (regs.hwm == 3 && unit == 0)) {
@@ -280,6 +287,8 @@ public:
             x = SignExtend<16>(x);
         if (y_sign)
             y = SignExtend<16>(y);
+        write_count["p"]++;
+        write_count["pe"]++;
         regs.p[unit] = x * y;
         if (x_sign || y_sign)
             regs.pe[unit] = regs.p[unit] >> 31;
@@ -400,6 +409,7 @@ public:
             u64 result = AddSub(value, product, true);
             SatAndSetAccAndFlag(b.GetName(), result);
 
+            write_count["x0"]++;
             regs.x[0] = a & 0xFFFF;
             DoMultiplication(0, true, true);
             break;
@@ -412,6 +422,8 @@ public:
         }
             [[fallthrough]];
         case AlmOp::Sqr: {
+            write_count["x0"]++;
+            write_count["y0"]++;
             regs.y[0] = regs.x[0] = a & 0xFFFF;
             DoMultiplication(0, true, true);
             break;
@@ -3116,7 +3128,6 @@ public:
         case RegName::p:
             // This only happen to insturctions using "Register" operand,
             // and doesn't apply to all instructions. Need test and special check.
-            read_count["p"]++;
             return (ProductToBus40(Px{0}) >> 16) & 0xFFFF;
 
         case RegName::pc:
@@ -3718,8 +3729,10 @@ public:
         return regs.p[reg.Index()];
     }
 
-    u64 ProductToBus40(Px reg) const {
+    u64 ProductToBus40(Px reg) {
         u16 unit = reg.Index();
+        read_count["p"]++;
+        read_count["pe"]++;
         u64 value = regs.p[unit] | ((u64)regs.pe[unit] << 32);
         switch (regs.ps[unit]) {
         case 0:
@@ -3743,6 +3756,8 @@ public:
 
     void ProductFromBus32(Px reg, u32 value) {
         u16 unit = reg.Index();
+        write_count["p"]++;
+        write_count["pe"]++;
         regs.p[unit] = value;
         regs.pe[unit] = value >> 31;
     }

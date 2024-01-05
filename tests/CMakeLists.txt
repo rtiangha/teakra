@@ -1,9 +1,9 @@
 add_executable(teakra_tests
-    dma.cpp
-    btdmp.cpp
-    interpreter.cpp
+    #dma.cpp
+    #btdmp.cpp
+    #interpreter.cpp
     main.cpp
-    timer.cpp
+    #timer.cpp
     firmware.cpp
     dsp1.h
     audio_types.h

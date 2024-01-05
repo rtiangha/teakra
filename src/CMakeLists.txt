@@ -52,6 +52,7 @@ add_library(teakra
     ir/opcode.h
     jit_no_ir.cpp
     jit_no_ir.h
+    jit_regs.h
 )
 
 create_target_directory_groups(teakra)
