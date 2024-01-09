@@ -7,7 +7,6 @@
 #include "crash.h"
 #include "bit_field.h"
 #include "common_types.h"
-#include "operand.h"
 #include <xbyak/xbyak.h>
 
 namespace Teakra {
@@ -19,28 +18,38 @@ using Xbyak::Reg16;
 
 // The following is used to alias some commonly used registers.
 
-/// XpertTeak GPRs
-/// r6 is seldom used, so we allocate its host reg to y0
-constexpr Reg64 R[] = {r8, r9, r10, r11, r12, r13, Reg64{}, r15};
+/// Quads of XpertTeak GPRs packed in a single host register
+constexpr Reg64 R0_1_2_3 = r8;
+constexpr Reg64 R4_5_6_7 = r9;
+
 /// XpertTeak accumulators
-constexpr Reg64 A[] = {rsi, rdi};
-constexpr Reg64 B[] = {rbp, rsp};
+constexpr Reg64 A[] = {r10, r11};
+constexpr Reg64 B[] = {r12, r13};
 /// Holds multiplication factor registers x0/x1/y0/y1.
 constexpr Reg64 FACTORS = r14;
 /// Holds the register structure pointer
-constexpr Reg64 REGS = rdx;
+constexpr Reg64 REGS = r15;
 /// Holds commonly used status flags
-constexpr Reg64 FLAGS = rcx;
-
-constexpr Reg64 R0_4 = r8;
-constexpr Reg64 R1_5 = r9;
-constexpr Reg64 R2_6 = r10;
-constexpr Reg64 R3_7 = r11;
+constexpr Reg32 FLAGS = edi;
 
 // Most frequently accessed status registers, or registers with no cross refrences are stored directly by the JIT for speed
 // These registers are also used in a static manner as it greatly reduces the amount of emitted assembly per block.
 
-union Ar {
+// This doesn't represent an actual register but the current status flags of the JIT
+union Flags {
+    BitField<0, 1, u16> fr;
+    BitField<1, 1, u16> flm; // set on saturation
+    BitField<2, 1, u16> fvl; // Rn zero flag
+    BitField<3, 1, u16> fe; // extension flag
+    BitField<4, 1, u16> fc0; // carry flag
+    BitField<5, 1, u16> fv; // overflow flag
+    BitField<6, 1, u16> fn; // normalized flag
+    BitField<7, 1, u16> fm; // negative flag
+    BitField<8, 1, u16> fz; // zero flag
+    BitField<12, 1, u16> fc1; // another carry flag
+};
+
+union ArU {
     BitField<0, 3, u16> arstep1;
     BitField<3, 2, u16> aroffset1;
     BitField<5, 3, u16> arstep0;
@@ -49,7 +58,7 @@ union Ar {
     BitField<13, 3, u16> arrn0;
 };
 
-union Arp {
+union ArpU {
     BitField<0, 3, u16> arpstepi;
     BitField<3, 2, u16> arpoffseti;
     BitField<5, 3, u16> arpstepj;
@@ -59,7 +68,12 @@ union Arp {
 };
 
 union Mod0 {
-    u16 raw{0x4};
+    Mod0() {
+        mod0_unk_const.Assign(1);
+        sata.Assign(1);
+    }
+
+    u16 raw;
     BitField<0, 1, u16> sat; // 1-bit, disable saturation when moving from acc
     BitField<1, 1, u16> sata; // 1-bit, disable saturation when moving to acc
     BitField<2, 3, u16> mod0_unk_const; // = 1, read only
@@ -72,6 +86,10 @@ union Mod0 {
 };
 
 union Mod1 {
+    Mod1() {
+        cmd.Assign(1);
+    }
+
     BitField<0, 8, u16> page; // 8-bit, higher part of MemImm8 address
     BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in banke, and use
                                 // stepi0/j0 for steping
@@ -97,6 +115,50 @@ union Mod2 {
     BitField<13, 1, u16> br5;
     BitField<14, 1, u16> br6;
     BitField<15, 1, u16> br7;
+};
+
+// Note: This registers owns none of its members
+union Mod3 {
+    u16 raw;
+    BitField<0, 1, u16> nimc;
+    BitField<1, 1, u16> ic0;
+    BitField<2, 1, u16> ic1;
+    BitField<3, 1, u16> ic2;
+    BitField<4, 1, u16> ou2;
+    BitField<5, 1, u16> ou3;
+    BitField<6, 1, u16> ou4;
+    BitField<7, 1, u16> ie;
+    BitField<8, 1, u16> im0;
+    BitField<9, 1, u16> im1;
+    BitField<10, 1, u16> im2;
+    BitField<11, 1, u16> imv;
+    BitField<13, 1, u16> ccnta;
+    BitField<14, 1, u16> cpc;
+    BitField<15, 1, u16> crep;
+
+    u64 IcQword() const {
+        return nimc.Value()
+        | (static_cast<u64>(ic0.Value()) << 16)
+        | (static_cast<u64>(ic1.Value()) << 32)
+        | (static_cast<u64>(ic2.Value()) << 48);
+    }
+
+    u32 OuDword() const {
+        return ou2.Value() | (static_cast<u32>(ou3.Value()) << 16);
+    }
+
+    u64 ImQword() const {
+        return im0.Value()
+        | (static_cast<u64>(im1.Value()) << 16)
+        | (static_cast<u64>(im2.Value()) << 32)
+        | (static_cast<u64>(imv.Value()) << 48);
+    }
+
+    u64 CQword() const {
+        return ccnta.Value()
+        | (static_cast<u64>(cpc.Value()) << 16)
+        | (static_cast<u64>(crep.Value()) << 32);
+    }
 };
 
 union Stt0 {
@@ -134,13 +196,14 @@ struct JitRegisters {
     /** Program control unit **/
 
     u32 pc = 0;     // 18-bit, program counter
+    u32 idle = 0;
+    Flags flags{};  // Not a register, but used to store host flags register.
+    u16 pad0{};
     u16 prpage = 0; // 4-bit, program page
-    u16 cpc = 1;    // 1-bit, change word order when push/pop pc
 
     u16 repc = 0;     // 16-bit rep loop counter
     u16 repcs = 0;    // repc shadow
     bool rep = false; // true when in rep loop
-    u16 crep = 1;     // 1-bit. If clear, store/restore repc to shadows on context switch
 
     u16 bcn = 0; // 3-bit, nest loop counter
     u16 lp = 0;  // 1-bit, set when in a loop
@@ -167,6 +230,9 @@ struct JitRegisters {
 
     u64 a1s = 0, b1s = 0; // shadows for a1 and b1
     u16 ccnta = 1;        // 1-bit. If clear, store/restore a1/b1 to shadows on context switch
+    u16 cpc = 1;    // 1-bit, change word order when push/pop pc
+    u16 crep = 1;     // 1-bit. If clear, store/restore repc to shadows on context switch
+    u16 pad = 0;
 
     ///< Swap register list
     u16 pcmhi = 0; // 2-bit, higher part of program address for movp/movd
@@ -213,10 +279,10 @@ struct JitRegisters {
     /** Address step/mod unit **/
 
     // step/modulo
-    u8 stepi = 0;   // 7-bit step
-    u8 modi = 0;
-    u8 stepj = 0;
-    u8 modj = 0;     // 9-bit mod
+    u16 stepi = 0;   // 7-bit step
+    u16 modi = 0;
+    u16 stepj = 0;
+    u16 modj = 0;     // 9-bit mod
     u16 stepi0 = 0;
     u16 stepj0 = 0; // 16-bit step
 
@@ -225,14 +291,21 @@ struct JitRegisters {
     u16 modib = 0, modjb = 0;
     u16 stepi0b = 0, stepj0b = 0;
 
+    JitRegisters() {
+        arp[0].arpoffseti.Assign(0);
+        arp[1].arpoffseti.Assign(1);
+        arp[2].arpoffseti.Assign(2);
+        arp[3].arpoffseti.Assign(0);
+    }
+
     /** Indirect address unit **/
-    std::array<Arp, 4> arp{};
-    std::array<Ar, 2> ar{};
+    std::array<ArpU, 4> arp{};
+    std::array<ArU, 2> ar{};
     u32 pad3; // SSE padding
 
     // Shadows for bank exchange
-    std::array<Arp, 4> arpb{};
-    std::array<Ar, 2> arb{};
+    std::array<ArpU, 4> arpb{};
+    std::array<ArU, 2> arb{};
     u32 pad4; // SSE padding
 
     /** Interrupt unit **/
@@ -242,8 +315,8 @@ struct JitRegisters {
     u16 ipv = 0;
 
     // interrupt context switching bit
-    std::array<u16, 3> ic{};
     u16 nimc = 0;
+    std::array<u16, 3> ic{};
 
     // interrupt enable master bit
     u16 ie = 0;
@@ -293,18 +366,18 @@ struct JitRegisters {
 
     void SwapAr(Xbyak::CodeGenerator& c, u16 index) {
         // std::swap(ar[index], arb[index]);
-        c.mov(ax, word[REGS + offsetof(JitRegisters, ar) + index * sizeof(Ar)]);
-        c.mov(bx, word[REGS + offsetof(JitRegisters, arb) + index * sizeof(Ar)]);
-        c.mov(word[REGS + offsetof(JitRegisters, ar) + index * sizeof(Ar)], bx);
-        c.mov(word[REGS + offsetof(JitRegisters, arb) + index * sizeof(Ar)], ax);
+        c.mov(ax, word[REGS + offsetof(JitRegisters, ar) + index * sizeof(ArU)]);
+        c.mov(bx, word[REGS + offsetof(JitRegisters, arb) + index * sizeof(ArU)]);
+        c.mov(word[REGS + offsetof(JitRegisters, ar) + index * sizeof(ArU)], bx);
+        c.mov(word[REGS + offsetof(JitRegisters, arb) + index * sizeof(ArU)], ax);
     }
 
     void SwapArp(Xbyak::CodeGenerator& c, u16 index) {
         // std::swap(arp[index], arpb[index]);
-        c.mov(ax, word[REGS + offsetof(JitRegisters, ar) + index * sizeof(Ar)]);
-        c.mov(bx, word[REGS + offsetof(JitRegisters, arb) + index * sizeof(Ar)]);
-        c.mov(word[REGS + offsetof(JitRegisters, ar) + index * sizeof(Ar)], bx);
-        c.mov(word[REGS + offsetof(JitRegisters, arb) + index * sizeof(Ar)], ax);
+        c.mov(ax, word[REGS + offsetof(JitRegisters, ar) + index * sizeof(ArpU)]);
+        c.mov(bx, word[REGS + offsetof(JitRegisters, arb) + index * sizeof(ArpU)]);
+        c.mov(word[REGS + offsetof(JitRegisters, ar) + index * sizeof(ArpU)], bx);
+        c.mov(word[REGS + offsetof(JitRegisters, arb) + index * sizeof(ArpU)], ax);
     }
 
     void GetCfgi(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
@@ -427,7 +500,24 @@ struct JitRegisters {
     template <typename T>
     void SetSt1(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch, T value) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
-            UNREACHABLE();
+            // Load mod1 and mod0 in a single 32-bit load
+            c.mov(scratch, dword[REGS + offsetof(JitRegisters, mod1)]);
+            // Copy to lower byte of mod1 which is page
+            c.mov(scratch.cvt8(), value.cvt8());
+            c.and_(value, ~0xFF);
+
+            // Replace ps0 and store back
+            c.shl(value, 32 - decltype(St1::a1e_alias)::position);
+            c.shr(value.cvt32(), 4);
+            c.and_(scratch, ~0xC000000); // Clear existing ps0
+            c.or_(scratch, value.cvt32());
+            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], scratch);
+
+            // Replace upper word of a[1] with sign extended a1e.
+            c.shl(value, 32 - decltype(St1::a1e_alias)::bits);
+            c.sar(value, 32 - decltype(St1::a1e_alias)::bits);
+            c.mov(value.cvt32(), A[1].cvt32());
+            c.mov(A[1], value);
         } else {
             const St1 reg{value};
             // Load mod1 and mod0 in a single 32-bit load
@@ -448,189 +538,22 @@ struct JitRegisters {
             c.rol(A[1], 32);
         }
     }
-};
 
-template <u16 JitRegisters::*target>
-struct Redirector {
-    static u16 Get(const JitRegisters* self) {
-        return self->*target;
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        self->*target = value;
-    }
-};
-
-template <std::size_t size, std::array<u16, size> JitRegisters::*target, std::size_t index>
-struct ArrayRedirector {
-    static u16 Get(const JitRegisters* self) {
-        return (self->*target)[index];
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        (self->*target)[index] = value;
-    }
-};
-
-template <u16 JitRegisters::*target0, u16 JitRegisters::*target1>
-struct DoubleRedirector {
-    static u16 Get(const JitRegisters* self) {
-        return self->*target0 | self->*target1;
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        self->*target0 = self->*target1 = value;
-    }
-};
-
-template <u16 JitRegisters::*target>
-struct RORedirector {
-    static u16 Get(const JitRegisters* self) {
-        return self->*target;
-    }
-    static void Set(JitRegisters*, u16) {
-        // no
-    }
-};
-
-template <std::size_t size, std::array<u16, size> JitRegisters::*target, std::size_t index>
-struct ArrayRORedirector {
-    static u16 Get(const JitRegisters* self) {
-        return (self->*target)[index];
-    }
-    static void Set(JitRegisters*, u16) {
-        // no
-    }
-};
-
-template <unsigned index>
-struct AccEProxy {
-    static u16 Get(const JitRegisters* self) {
-        return (u16)((self->a[index] >> 32) & 0xF);
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        u32 value32 = SignExtend<4>((u32)value);
-        self->a[index] &= 0xFFFFFFFF;
-        self->a[index] |= (u64)value32 << 32;
-    }
-};
-
-struct LPRedirector {
-    static u16 Get(const JitRegisters* self) {
-        return self->lp;
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        if (value != 0) {
-            self->lp = 0;
-            self->bcn = 0;
+    template <typename T>
+    void SetMod3(Xbyak::CodeGenerator& c, T value) {
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            UNREACHABLE();
+        } else {
+            // This is awful but the register is seldom accessed anyway...
+            const Mod3 reg{.raw = value};
+            c.mov(qword[REGS + offsetof(JitRegisters, nimc)], reg.IcQword());
+            c.mov(dword[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 2], reg.OuDword());
+            c.mov(word[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 4], reg.ou4.Value());
+            c.mov(word[REGS + offsetof(JitRegisters, ie)], reg.ie.Value());
+            c.mov(qword[REGS + offsetof(JitRegisters, im)], reg.ImQword());
+            c.mov(qword[REGS + offsetof(JitRegisters, ccnta)], reg.CQword());
         }
     }
 };
-
-template <typename Proxy, unsigned position, unsigned length>
-struct ProxySlot {
-    using proxy = Proxy;
-    static constexpr unsigned pos = position;
-    static constexpr unsigned len = length;
-    static_assert(length < 16, "Error");
-    static_assert(position + length <= 16, "Error");
-    static constexpr u16 mask = ((1 << length) - 1) << position;
-};
-
-template <typename... ProxySlots>
-struct PseudoRegister {
-    static_assert(NoOverlap<u16, ProxySlots::mask...>, "Error");
-    static u16 Get(const JitRegisters* self) {
-        return ((ProxySlots::proxy::Get(self) << ProxySlots::pos) | ...);
-    }
-    static void Set(JitRegisters* self, u16 value) {
-        (ProxySlots::proxy::Set(self, (value >> ProxySlots::pos) & ((1 << ProxySlots::len) - 1)),
-         ...);
-    }
-};
-
-// clang-format off
-
-struct StaticRegs {
-    u8 stepi;
-    u8 stepj;
-    u16 modi;
-    u16 modj;
-    u16 stp16;
-    u16 epi;
-    u16 epj;
-};
-
-using stt2 = PseudoRegister<
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 0>, 0, 1>,
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 1>, 1, 1>,
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 2>, 2, 1>,
-    ProxySlot<RORedirector<&JitRegisters::ipv>, 3, 1>,
-
-    ProxySlot<Redirector<&JitRegisters::pcmhi>, 6, 2>,
-
-    ProxySlot<RORedirector<&JitRegisters::bcn>, 12, 3>,
-    ProxySlot<LPRedirector, 15, 1>
-    >;
-
-using mod3 = PseudoRegister<    // Static
-    ProxySlot<Redirector<&JitRegisters::nimc>, 0, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 0>, 1, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 1>, 2, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 2>, 3, 1>,
-    ProxySlot<ArrayRedirector<5, &JitRegisters::ou, 2>, 4, 1>,
-    ProxySlot<ArrayRedirector<5, &JitRegisters::ou, 3>, 5, 1>,
-    ProxySlot<ArrayRedirector<5, &JitRegisters::ou, 4>, 6, 1>,
-    ProxySlot<Redirector<&JitRegisters::ie>, 7, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 0>, 8, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 1>, 9, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 2>, 10, 1>,
-    ProxySlot<Redirector<&JitRegisters::imv>, 11, 1>,
-
-    ProxySlot<Redirector<&JitRegisters::ccnta>, 13, 1>,
-    ProxySlot<Redirector<&JitRegisters::cpc>, 14, 1>,
-    ProxySlot<Redirector<&JitRegisters::crep>, 15, 1>
-    >;
-
-using st0 = PseudoRegister< // Dynamic
-    ProxySlot<Redirector<&JitRegisters::sat>, 0, 1>,
-    ProxySlot<Redirector<&JitRegisters::ie>, 1, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 0>, 2, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 1>, 3, 1>,
-    ProxySlot<Redirector<&JitRegisters::fr>, 4, 1>,
-    ProxySlot<DoubleRedirector<&JitRegisters::flm, &JitRegisters::fvl>, 5, 1>,
-    ProxySlot<Redirector<&JitRegisters::fe>, 6, 1>,
-    ProxySlot<Redirector<&JitRegisters::fc0>, 7, 1>,
-    ProxySlot<Redirector<&JitRegisters::fv>, 8, 1>,
-    ProxySlot<Redirector<&JitRegisters::fn>, 9, 1>,
-    ProxySlot<Redirector<&JitRegisters::fm>, 10, 1>,
-    ProxySlot<Redirector<&JitRegisters::fz>, 11, 1>,
-    ProxySlot<AccEProxy<0>, 12, 4>
-    >;
-using st2 = PseudoRegister< // Dynamic
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 0>, 0, 1>,
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 1>, 1, 1>,
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 2>, 2, 1>,
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 3>, 3, 1>,
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 4>, 4, 1>,
-    ProxySlot<ArrayRedirector<8, &JitRegisters::m, 5>, 5, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::im, 2>, 6, 1>,
-    ProxySlot<Redirector<&JitRegisters::s>, 7, 1>,
-    ProxySlot<ArrayRedirector<5, &JitRegisters::ou, 0>, 8, 1>,
-    ProxySlot<ArrayRedirector<5, &JitRegisters::ou, 1>, 9, 1>,
-    ProxySlot<ArrayRORedirector<2, &JitRegisters::iu, 0>, 10, 1>,
-    ProxySlot<ArrayRORedirector<2, &JitRegisters::iu, 1>, 11, 1>,
-    // 12: reserved
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 2>, 13, 1>, // Note the index order!
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 0>, 14, 1>,
-    ProxySlot<ArrayRORedirector<3, &JitRegisters::ip, 1>, 15, 1>
-    >;
-using icr = PseudoRegister<
-    ProxySlot<Redirector<&JitRegisters::nimc>, 0, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 0>, 1, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 1>, 2, 1>,
-    ProxySlot<ArrayRedirector<3, &JitRegisters::ic, 2>, 3, 1>,
-    ProxySlot<LPRedirector, 4, 1>,
-    ProxySlot<RORedirector<&JitRegisters::bcn>, 5, 3>
-    >;
-
-// clang-format on
 
 } // namespace Teakra

@@ -103,6 +103,18 @@ constexpr inline Xbyak::Reg ABI_PARAM2 = Xbyak::util::rsi;
 constexpr inline Xbyak::Reg ABI_PARAM3 = Xbyak::util::rdx;
 constexpr inline Xbyak::Reg ABI_PARAM4 = Xbyak::util::rcx;
 
+const std::bitset<32> ABI_ALL_CALLER_SAVED_GPR = BuildRegSet({
+    // GPRs
+    Xbyak::util::rcx,
+    Xbyak::util::rdx,
+    Xbyak::util::rdi,
+    Xbyak::util::rsi,
+    Xbyak::util::r8,
+    Xbyak::util::r9,
+    Xbyak::util::r10,
+    Xbyak::util::r11
+});
+
 const std::bitset<32> ABI_ALL_CALLER_SAVED = BuildRegSet({
     // GPRs
     Xbyak::util::rcx,
@@ -219,6 +231,28 @@ inline void ABI_PopRegistersAndAdjustStack(Xbyak::CodeGenerator& code, std::bits
         if (regs[reg_index]) {
             code.pop(IndexToReg64(reg_index));
         }
+    }
+}
+
+inline bool IsWithin2G(uintptr_t ref, uintptr_t target) {
+    u64 distance = target - (ref + 5);
+    return !(distance >= 0x8000'0000ULL && distance <= ~0x8000'0000ULL);
+}
+
+inline bool IsWithin2G(const Xbyak::CodeGenerator& code, uintptr_t target) {
+    return IsWithin2G(reinterpret_cast<uintptr_t>(code.getCurr()), target);
+}
+
+template <typename T>
+inline void CallFarFunction(Xbyak::CodeGenerator& code, const T f) {
+    static_assert(std::is_pointer_v<T>, "Argument must be a (function) pointer.");
+    std::size_t addr = reinterpret_cast<std::size_t>(f);
+    if (IsWithin2G(code, addr)) {
+        code.call(f);
+    } else {
+        // ABI_RETURN is a safe temp register to use before a call
+        code.mov(ABI_RETURN, addr);
+        code.call(ABI_RETURN);
     }
 }
 

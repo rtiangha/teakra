@@ -17,7 +17,6 @@ public:
     void Run(unsigned cycles);
     void SignalInterrupt(u32 i);
     void SignalVectoredInterrupt(u32 address, bool context_switch);
-    Interpreter& Interp();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

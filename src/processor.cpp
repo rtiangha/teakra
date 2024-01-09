@@ -1,4 +1,4 @@
-#include "interpreter.h"
+#include "jit_no_ir.h"
 #include "processor.h"
 #include "register.h"
 
@@ -8,8 +8,8 @@ struct Processor::Impl {
     Impl(CoreTiming& core_timing, MemoryInterface& memory_interface)
         : core_timing(core_timing), interpreter(core_timing, regs, memory_interface) {}
     CoreTiming& core_timing;
-    RegisterState regs;
-    Interpreter interpreter;
+    JitRegisters regs;
+    EmitX64 interpreter;
 };
 
 Processor::Processor(CoreTiming& core_timing, MemoryInterface& memory_interface)
@@ -17,15 +17,11 @@ Processor::Processor(CoreTiming& core_timing, MemoryInterface& memory_interface)
 Processor::~Processor() = default;
 
 void Processor::Reset() {
-    impl->regs = RegisterState();
+    impl->regs.Reset();
 }
 
 void Processor::Run(unsigned cycles) {
     impl->interpreter.Run(cycles);
-}
-
-Interpreter& Processor::Interp() {
-    return impl->interpreter;
 }
 
 void Processor::SignalInterrupt(u32 i) {

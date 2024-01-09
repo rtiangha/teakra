@@ -53,6 +53,9 @@ add_library(teakra
     jit_no_ir.cpp
     jit_no_ir.h
     jit_regs.h
+    cityhash.cpp
+    cityhash.h
+    hash.h
 )
 
 create_target_directory_groups(teakra)

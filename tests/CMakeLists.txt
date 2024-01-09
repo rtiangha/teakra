@@ -4,7 +4,7 @@ add_executable(teakra_tests
     #interpreter.cpp
     main.cpp
     #timer.cpp
-    firmware.cpp
+    #firmware.cpp
     dsp1.h
     audio_types.h
     lle.h

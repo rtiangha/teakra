@@ -163,7 +163,7 @@ void SourceStatus() {
         state.notifyDsp();
 
         printf("Done!\n");
-        std::vector<std::pair<std::string, u32>> names;
+        /*std::vector<std::pair<std::string, u32>> names;
         auto& read_count = state.lle.teakra.GetProcessor().Interp().read_count;
         for (const auto& [name, count] : read_count) {
             names.emplace_back(name, count);
@@ -171,7 +171,7 @@ void SourceStatus() {
         std::ranges::sort(names, [](auto& a, auto& b) { return a.second > b.second; });
         for (auto& [name, count] : names) {
             printf("%s %d\n", name.c_str(), count);
-        }
+        }*/
     }
 }
 
