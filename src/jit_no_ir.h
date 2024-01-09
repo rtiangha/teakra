@@ -44,10 +44,14 @@ public:
         u8 stepj;
         u16 modi;
         u16 modj;
+        u16 stepi0;
+        u16 stepj0;
         Mod0 mod0;
         Mod1 mod1;
         Mod2 mod2;
         u32 pc;
+        std::array<ArpU, 4> arp;
+        std::array<ArU, 2> ar;
     };
 
     struct Block {
@@ -164,6 +168,10 @@ public:
         blk_key.modj = regs.modj;
         blk_key.stepi = regs.stepi;
         blk_key.stepj = regs.stepj;
+        blk_key.stepi0 = regs.stepi0;
+        blk_key.stepj0 = regs.stepj0;
+        blk_key.ar = regs.ar;
+        blk_key.arp = regs.arp;
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
         if (new_block) {
@@ -255,6 +263,23 @@ public:
         }
     }
 
+    void EmitPopPC() {
+        const Reg16 sp = bx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 pc = rcx;
+        if (regs.cpc == 1) {
+            UNREACHABLE();
+        } else {
+            LoadFromMemory(pc, sp);
+            c.add(sp, 1);
+            c.shl(pc, 16);
+            LoadFromMemory(pc, sp);
+            c.add(sp, 1);
+        }
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], pc.cvt32());
+    }
+
     void PopPC() {
         u16 h, l;
         if (regs.cpc == 1) {
@@ -324,14 +349,15 @@ public:
         LoadFromMemory(out, addr.Unsigned16() + (blk_key.mod1.page << 8));
     }
 
-    void LoadFromMemory(Reg64 out, u16 addr) {
+    template <typename T>
+    void LoadFromMemory(Reg64 out, T addr) {
         // TODO: Non MMIO reads can be performed inside the JIT.
         ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         c.mov(ABI_PARAM2, addr);
         CallFarFunction(c, MemDataReadThunk);
         ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
-        c.mov(out, ABI_RETURN);
+        c.mov(out.cvt16(), ABI_RETURN);
     }
 
     void DoMultiplication(u32 unit, Reg32 x, Reg32 y, bool x_sign, bool y_sign) {
@@ -586,6 +612,86 @@ public:
         UNREACHABLE();
     }
 
+    u16 GenericAlbConst(Alb op, u16 a, u16 b) {
+        u16 result;
+        switch (op.GetName()) {
+        case AlbOp::Set: {
+            result = a | b;
+            if (result >> 15) {
+                c.bts(FLAGS, decltype(Flags::fm)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fm)::position);
+            }
+            break;
+        }
+        case AlbOp::Rst: {
+            result = ~a & b;
+            if (result >> 15) {
+                c.bts(FLAGS, decltype(Flags::fm)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fm)::position);
+            }
+            break;
+        }
+        case AlbOp::Chng: {
+            result = a ^ b;
+            if (result >> 15) {
+                c.bts(FLAGS, decltype(Flags::fm)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fm)::position);
+            }
+            break;
+        }
+        case AlbOp::Addv: {
+            u32 r = a + b;
+            if ((r >> 16) != 0) {
+                c.bts(FLAGS, decltype(Flags::fc0)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fc0)::position);
+            }
+            if ((::SignExtend<16, u32>(b) + ::SignExtend<16, u32>(a)) >> 31) {
+                c.bts(FLAGS, decltype(Flags::fc0)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fc0)::position);
+            }
+            result = r & 0xFFFF;
+            break;
+        }
+        case AlbOp::Tst0: {
+            result = (a & b) != 0;
+            break;
+        }
+        case AlbOp::Tst1: {
+            result = (a & ~b) != 0;
+            break;
+        }
+        case AlbOp::Cmpv:
+        case AlbOp::Subv: {
+            u32 r = b - a;
+            if ((r >> 16) != 0) {
+                c.bts(FLAGS, decltype(Flags::fc0)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fc0)::position);
+            }
+            if ((::SignExtend<16, u32>(b) + ::SignExtend<16, u32>(a)) >> 31) {
+                c.bts(FLAGS, decltype(Flags::fc0)::position);
+            } else {
+                c.btr(FLAGS, decltype(Flags::fc0)::position);
+            }
+            result = r & 0xFFFF;
+            break;
+        }
+        default:
+            UNREACHABLE();
+        }
+        if (result == 0) {
+            c.bts(FLAGS, decltype(Flags::fz)::position);
+        } else {
+            c.btr(FLAGS, decltype(Flags::fz)::position);
+        }
+        return result;
+    }
+
     void GenericAlb(Alb op, u16 a, Reg16 b, Reg16 result) {
         switch (op.GetName()) {
         case AlbOp::Set: {
@@ -693,6 +799,17 @@ public:
         }
     }
 
+    static bool IsAlbConst(SttMod b) {
+        switch (b.GetName()) {
+        case RegName::mod0:
+        case RegName::mod1:
+        case RegName::mod2:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     void alb(Alb op, Imm16 a, MemImm8 b) {
         UNREACHABLE();
     }
@@ -758,6 +875,27 @@ public:
         UNREACHABLE();
     }
     void alb(Alb op, Imm16 a, SttMod b) {
+        if (IsAlbConst(b)) {
+            u16 bv;
+            switch (b.GetName()) {
+            case RegName::mod0:
+                bv = blk_key.mod0.raw;
+                break;
+            case RegName::mod1:
+                bv = blk_key.mod1.raw;
+                break;
+            case RegName::mod2:
+                bv = blk_key.mod2.raw;
+                break;
+            default:
+                UNREACHABLE();
+            }
+            u16 result = GenericAlbConst(op, a.Unsigned16(), bv);
+            if (IsAlbModifying(op)) {
+                RegFromBus16(b.GetName(), result);
+            }
+            return;
+        }
         const Reg64 bv = rax;
         RegToBus16(b.GetName(), bv);
         const Reg16 result = bx;
@@ -1219,14 +1357,55 @@ public:
     }
 
     void cntx_s() {
-        UNREACHABLE();
+        regs.ShadowStore(c, eax);
+        regs.ShadowSwap(c);
+        // if (!regs.crep) {
+        //     regs.repcs = regs.repc;
+        // }
+        c.mov(ax, word[REGS + offsetof(JitRegisters, repcs)]);
+        c.test(word[REGS + offsetof(JitRegisters, crep)], 0x1);
+        c.cmovz(ax, word[REGS + offsetof(JitRegisters, repc)]);
+        c.mov(word[REGS + offsetof(JitRegisters, repcs)], ax);
+
+        Xbyak::Label ccnta_label, end_label;
+        c.test(word[REGS + offsetof(JitRegisters, ccnta)], 0x1);
+        c.jnz(ccnta_label);
+        c.mov(qword[REGS + offsetof(JitRegisters, a1s)], A[1]);
+        c.mov(qword[REGS + offsetof(JitRegisters, b1s)], B[1]);
+        c.jmp(end_label);
+        c.L(ccnta_label);
+        c.mov(rax, B[1]);
+        c.mov(B[1], A[1]);
+        SetAccAndFlag(RegName::a1, rax); // Flag set on b1->a1
+        c.L(end_label);
     }
     void cntx_r() {
-        UNREACHABLE();
+        regs.ShadowRestore(c, eax);
+        regs.ShadowSwap(c);
+
+        // if (!regs.crep) {
+        //     regs.repc = regs.repcs;
+        // }
+        c.mov(ax, word[REGS + offsetof(JitRegisters, repc)]);
+        c.test(word[REGS + offsetof(JitRegisters, crep)], 0x1);
+        c.cmovz(ax, word[REGS + offsetof(JitRegisters, repcs)]);
+        c.mov(word[REGS + offsetof(JitRegisters, repc)], ax);
+
+        Xbyak::Label ccnta_label, end_label;
+        c.test(word[REGS + offsetof(JitRegisters, ccnta)], 0x1);
+        c.jnz(ccnta_label);
+        c.mov(A[1], qword[REGS + offsetof(JitRegisters, a1s)]);
+        c.mov(B[1], qword[REGS + offsetof(JitRegisters, b1s)]);
+        c.L(ccnta_label);
+        c.xchg(A[1], B[1]);
+        c.L(end_label);
     }
 
     void ret(Cond c) {
-        UNREACHABLE();
+        ConditionPass(c, [&] {
+            EmitPopPC();
+        });
+        compiling = false;
     }
     void retd() {
         UNREACHABLE();
@@ -1673,7 +1852,8 @@ public:
         UNREACHABLE();
     }
     void mov(Imm16 a, ArArp b) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        RegFromBus16(b.GetName(), value);
     }
     void mov_r6(Imm16 a) {
         UNREACHABLE();
@@ -1682,10 +1862,14 @@ public:
         UNREACHABLE();
     }
     void mov_stepi0(Imm16 a) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        c.mov(word[REGS + offsetof(JitRegisters, stepi0)], value);
+        blk_key.stepi0 = value;
     }
     void mov_stepj0(Imm16 a) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        c.mov(word[REGS + offsetof(JitRegisters, stepj0)], value);
+        blk_key.stepj0 = value;
     }
     void mov(Imm16 a, SttMod b) {
         const u16 value = a.Unsigned16();
@@ -2272,6 +2456,9 @@ private:
         case RegName::sp:
             c.movzx(out, word[REGS + offsetof(JitRegisters, sp)]);
             break;
+        case RegName::mod0:
+            regs.GetMod0(c, out.cvt16());
+            break;
         default:
             UNREACHABLE();
         }
@@ -2378,9 +2565,59 @@ private:
         case RegName::sp:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value);
             break;
+        case RegName::mod0:
+            blk_key.mod0.raw = value;
+            regs.SetMod0(c, value);
+            break;
+        case RegName::mod1:
+            blk_key.mod1.raw = value;
+            regs.SetMod1(c, value);
+            break;
+        case RegName::mod2:
+            blk_key.mod2.raw = value;
+            regs.SetMod2(c, value);
+            break;
         case RegName::mod3:
             regs.SetMod3(c, value);
             break;
+
+        case RegName::cfgi:
+            blk_key.modi = Cfg{value}.mod;
+            blk_key.stepi = Cfg{value}.step;
+            regs.SetCfgi(c, value);
+            break;
+        case RegName::cfgj:
+            blk_key.modj = Cfg{value}.mod;
+            blk_key.stepj = Cfg{value}.step;
+            regs.SetCfgj(c, value);
+            break;
+
+        case RegName::ar0:
+            blk_key.ar[0].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, ar)], value);
+            break;
+        case RegName::ar1:
+            blk_key.ar[1].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, ar) + sizeof(u16)], value);
+            break;
+
+        case RegName::arp0:
+            blk_key.arp[0].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, arp)], value);
+            break;
+        case RegName::arp1:
+            blk_key.arp[1].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16)], value);
+            break;
+        case RegName::arp2:
+            blk_key.arp[2].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 2], value);
+            break;
+        case RegName::arp3:
+            blk_key.arp[3].raw = value;
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 3], value);
+            break;
+
         default:
             UNREACHABLE();
         }

@@ -50,6 +50,7 @@ union Flags {
 };
 
 union ArU {
+    u16 raw;
     BitField<0, 3, u16> arstep1;
     BitField<3, 2, u16> aroffset1;
     BitField<5, 3, u16> arstep0;
@@ -59,6 +60,7 @@ union ArU {
 };
 
 union ArpU {
+    u16 raw;
     BitField<0, 3, u16> arpstepi;
     BitField<3, 2, u16> arpoffseti;
     BitField<5, 3, u16> arpstepj;
@@ -90,6 +92,7 @@ union Mod1 {
         cmd.Assign(1);
     }
 
+    u16 raw;
     BitField<0, 8, u16> page; // 8-bit, higher part of MemImm8 address
     BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in banke, and use
                                 // stepi0/j0 for steping
@@ -99,6 +102,7 @@ union Mod1 {
 };
 
 union Mod2 {
+    u16 raw;
     BitField<0, 1, u16> m0; // 1-bit each, enable modulo arithmetic for Rn
     BitField<1, 1, u16> m1;
     BitField<2, 1, u16> m2;
@@ -186,6 +190,13 @@ union St1 {
     BitField<0, 8, u16> page_alias;
     BitField<10, 2, u16> ps0_alias;
     BitField<12, 4, u16> a1e_alias;
+};
+
+union Cfg {
+    Cfg(u16 value) : raw{value} {}
+    u16 raw;
+    BitField<0, 7, u16> step;
+    BitField<7, 9, u16> mod;
 };
 
 struct JitRegisters {
@@ -335,9 +346,9 @@ struct JitRegisters {
     std::array<u16, 3> imb{}; // interrupt enable bit
     u16 imvb = 0;
 
-    void ShadowStore(Xbyak::CodeGenerator& c, Xbyak::Reg64 regs, Xbyak::Reg32 scratch) {
-        c.mov(scratch, dword[regs + offsetof(JitRegisters, stt0)]);
-        c.mov(dword[regs + offsetof(JitRegisters, stt0b)], scratch);
+    void ShadowStore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
+        c.mov(scratch, dword[REGS + offsetof(JitRegisters, stt0)]);
+        c.mov(dword[REGS + offsetof(JitRegisters, stt0b)], scratch);
     }
 
     void ShadowRestore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
