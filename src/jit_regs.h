@@ -193,7 +193,7 @@ union St1 {
 };
 
 union Cfg {
-    Cfg(u16 value) : raw{value} {}
+    Cfg(u16 value = 0) : raw{value} {}
     u16 raw;
     BitField<0, 7, u16> step;
     BitField<7, 9, u16> mod;
@@ -208,7 +208,6 @@ struct JitRegisters {
 
     u32 pc = 0;     // 18-bit, program counter
     u32 idle = 0;
-    Flags flags{};  // Not a register, but used to store host flags register.
     u16 pad0{};
     u16 prpage = 0; // 4-bit, program page
 
@@ -256,15 +255,10 @@ struct JitRegisters {
 
     u16 sv = 0;   // 16-bit two's complement shift value
 
-    Stt0 stt0{};
-    u8 fr = 0;  // Rn zero flag
-                // fr can be accessed in
-    u8 pad1; // padding
+    Flags flags{};  // Not a register, but used to store host flags register.
 
     // Shadows
-    Stt0 stt0b{};
-    u8 frb = 0;
-    u8 pad2; // padding
+    Flags flagsb{};
 
     // Viterbi
     u16 vtr0 = 0;
@@ -290,16 +284,12 @@ struct JitRegisters {
     /** Address step/mod unit **/
 
     // step/modulo
-    u16 stepi = 0;   // 7-bit step
-    u16 modi = 0;
-    u16 stepj = 0;
-    u16 modj = 0;     // 9-bit mod
+    Cfg cfgi{}, cfgj{};
     u16 stepi0 = 0;
     u16 stepj0 = 0; // 16-bit step
 
     // shadows for bank exchange
-    u16 stepib = 0, stepjb = 0;
-    u16 modib = 0, modjb = 0;
+    Cfg cfgib{}, cfgjb{};
     u16 stepi0b = 0, stepj0b = 0;
 
     JitRegisters() {
@@ -347,13 +337,13 @@ struct JitRegisters {
     u16 imvb = 0;
 
     void ShadowStore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
-        c.mov(scratch, dword[REGS + offsetof(JitRegisters, stt0)]);
-        c.mov(dword[REGS + offsetof(JitRegisters, stt0b)], scratch);
+        c.mov(scratch, dword[REGS + offsetof(JitRegisters, flags)]);
+        c.mov(dword[REGS + offsetof(JitRegisters, flagsb)], scratch);
     }
 
     void ShadowRestore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
-        c.mov(scratch, dword[REGS + offsetof(JitRegisters, stt0b)]);
-        c.mov(dword[REGS + offsetof(JitRegisters, stt0)], scratch);
+        c.mov(scratch, dword[REGS + offsetof(JitRegisters, flagsb)]);
+        c.mov(dword[REGS + offsetof(JitRegisters, flags)], scratch);
     }
 
     void SwapAllArArp(Xbyak::CodeGenerator& c) {
@@ -392,28 +382,34 @@ struct JitRegisters {
     }
 
     void GetCfgi(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, stepi)]);
+        c.mov(out, word[REGS + offsetof(JitRegisters, cfgi)]);
     }
 
     void SetCfgi(Xbyak::CodeGenerator& c, auto value) {
-        c.mov(word[REGS + offsetof(JitRegisters, stepi)], value);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgi)], value);
     }
 
     void GetCfgj(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, stepj)]);
+        c.mov(out, word[REGS + offsetof(JitRegisters, cfgj)]);
     }
 
     void SetCfgj(Xbyak::CodeGenerator& c, auto value) {
-        c.mov(word[REGS + offsetof(JitRegisters, stepj)], value);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgj)], value);
     }
 
     void GetStt0(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, stt0)]);
+        c.mov(out, FLAGS);
+        c.shr(out, 1); // Flags is the same as Stt0 but has fz in bit0, shift it out.
     }
 
     template <typename T>
     void SetStt0(Xbyak::CodeGenerator& c, Xbyak::Reg16 scratch, T value) {
-        c.mov(word[REGS + offsetof(JitRegisters, stt0)], value);
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            UNREACHABLE();
+        } else {
+            c.and_(FLAGS, decltype(Flags::fz)::mask);
+            c.or_(FLAGS, value << 1);
+        }
     }
 
     void GetMod0(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
@@ -469,11 +465,11 @@ struct JitRegisters {
            ProxySlot<AccEProxy<0>, 12, 4>
            >;
          **/
-
+        UNREACHABLE();
         c.xor_(out, out);
 
         // Load flags and handle fvl latch
-        c.mov(scratch.cvt8(), byte[REGS + offsetof(JitRegisters, stt0)]);
+        //c.mov(scratch.cvt8(), byte[REGS + offsetof(JitRegisters, stt0)]);
         c.mov(out.cvt8(), scratch.cvt8());
         c.and_(out.cvt8(), 1);
         c.shr(scratch.cvt8(), 1);

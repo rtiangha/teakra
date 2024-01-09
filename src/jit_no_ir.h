@@ -39,19 +39,20 @@ public:
 
     using BlockFunc = void(*)(JitRegisters*);
 
-    struct BlockKey {
-        u8 stepi;
-        u8 stepj;
-        u16 modi;
-        u16 modj;
-        u16 stepi0;
-        u16 stepj0;
+    struct BlockSwapState {
+        Cfg cfgi, cfgj;
+        u16 stepi0, stepj0;
         Mod0 mod0;
         Mod1 mod1;
         Mod2 mod2;
-        u32 pc;
         std::array<ArpU, 4> arp;
         std::array<ArU, 2> ar;
+    };
+
+    struct BlockKey {
+        BlockSwapState curr;
+        BlockSwapState shadow;
+        u32 pc;
     };
 
     struct Block {
@@ -161,17 +162,29 @@ public:
 
         // Lookup and compile next block
         blk_key.pc = regs.pc;
-        blk_key.mod0 = regs.mod0;
-        blk_key.mod1 = regs.mod1;
-        blk_key.mod2 = regs.mod2;
-        blk_key.modi = regs.modi;
-        blk_key.modj = regs.modj;
-        blk_key.stepi = regs.stepi;
-        blk_key.stepj = regs.stepj;
-        blk_key.stepi0 = regs.stepi0;
-        blk_key.stepj0 = regs.stepj0;
-        blk_key.ar = regs.ar;
-        blk_key.arp = regs.arp;
+
+        // Current state
+        blk_key.curr.mod0 = regs.mod0;
+        blk_key.curr.mod1 = regs.mod1;
+        blk_key.curr.mod2 = regs.mod2;
+        blk_key.curr.cfgi = regs.cfgi;
+        blk_key.curr.cfgj = regs.cfgj;
+        blk_key.curr.stepi0 = regs.stepi0;
+        blk_key.curr.stepj0 = regs.stepj0;
+        blk_key.curr.ar = regs.ar;
+        blk_key.curr.arp = regs.arp;
+
+        // Shadow state.
+        blk_key.shadow.mod0 = regs.mod0b;
+        blk_key.shadow.mod1 = regs.mod1b;
+        blk_key.shadow.mod2 = regs.mod2b;
+        blk_key.shadow.cfgi = regs.cfgib;
+        blk_key.shadow.cfgj = regs.cfgjb;
+        blk_key.shadow.stepi0 = regs.stepi0b;
+        blk_key.shadow.stepj0 = regs.stepj0b;
+        blk_key.shadow.ar = regs.arb;
+        blk_key.shadow.arp = regs.arpb;
+
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
         if (new_block) {
@@ -346,7 +359,7 @@ public:
     }
 
     void LoadFromMemory(Reg64 out, MemImm8 addr) {
-        LoadFromMemory(out, addr.Unsigned16() + (blk_key.mod1.page << 8));
+        LoadFromMemory(out, addr.Unsigned16() + (blk_key.curr.mod1.page << 8));
     }
 
     template <typename T>
@@ -371,9 +384,9 @@ public:
             c.movzx(x, y.cvt16());
             c.shr(y.cvt64(), 32);
         }
-        if (blk_key.mod0.hwm == 1 || (blk_key.mod0.hwm == 3 && unit == 0)) {
+        if (blk_key.curr.mod0.hwm == 1 || (blk_key.curr.mod0.hwm == 3 && unit == 0)) {
             c.shr(y, 8);
-        } else if (blk_key.mod0.hwm == 2 || (blk_key.mod0.hwm == 3 && unit == 1)) {
+        } else if (blk_key.curr.mod0.hwm == 2 || (blk_key.curr.mod0.hwm == 3 && unit == 1)) {
             c.and_(y, 0xFF);
         }
         if (x_sign) {
@@ -879,13 +892,13 @@ public:
             u16 bv;
             switch (b.GetName()) {
             case RegName::mod0:
-                bv = blk_key.mod0.raw;
+                bv = blk_key.curr.mod0.raw;
                 break;
             case RegName::mod1:
-                bv = blk_key.mod1.raw;
+                bv = blk_key.curr.mod1.raw;
                 break;
             case RegName::mod2:
-                bv = blk_key.mod2.raw;
+                bv = blk_key.curr.mod2.raw;
                 break;
             default:
                 UNREACHABLE();
@@ -1006,7 +1019,7 @@ public:
         if ((sv >> 15) == 0) {
             // left shift
             if (sv >= 40) {
-                if (blk_key.mod0.s == 0) {
+                if (blk_key.curr.mod0.s == 0) {
                     // regs.fv = value != 0;
                     c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
                     c.test(value, value);
@@ -1025,7 +1038,7 @@ public:
                 c.xor_(value, value); // value = 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
             } else {
-                if (blk_key.mod0.s == 0) {
+                if (blk_key.curr.mod0.s == 0) {
                     // TODO: This can probably be done better
                     c.mov(rcx, value);
                     c.mov(rdx, value);
@@ -1055,7 +1068,7 @@ public:
             // right shift
             u16 nsv = ~sv + 1;
             if (nsv >= 40) {
-                if (blk_key.mod0.s == 0) {
+                if (blk_key.curr.mod0.s == 0) {
                     UNREACHABLE();
                     // regs.fc0 = (value >> 39) & 1;
                     // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
@@ -1071,19 +1084,19 @@ public:
                 c.shl(cx, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
                 c.or_(FLAGS, cx);
                 c.shr(value, nsv); // value >>= nsv;
-                if (blk_key.mod0.s == 0) {
+                if (blk_key.curr.mod0.s == 0) {
                     SignExtend(value, 40 - nsv);
                 }
             }
 
-            if (blk_key.mod0.s == 0) {
+            if (blk_key.curr.mod0.s == 0) {
                 c.and_(FLAGS, ~decltype(Flags::fv)::mask); // regs.fv = 0;
             }
         }
 
         SignExtend(value, 40);
         SetAccFlag(value);
-        if (blk_key.mod0.s == 0 && blk_key.mod0.sata == 0) {
+        if (blk_key.curr.mod0.s == 0 && blk_key.curr.mod0.sata == 0) {
             UNREACHABLE();
             /*if (regs.fv || SignExtend<32>(value) != value) {
                 regs.flm = 1;
@@ -1359,6 +1372,7 @@ public:
     void cntx_s() {
         regs.ShadowStore(c, eax);
         regs.ShadowSwap(c);
+        std::swap(blk_key.curr, blk_key.shadow);
         // if (!regs.crep) {
         //     regs.repcs = regs.repc;
         // }
@@ -1382,6 +1396,7 @@ public:
     void cntx_r() {
         regs.ShadowRestore(c, eax);
         regs.ShadowSwap(c);
+        std::swap(blk_key.curr, blk_key.shadow);
 
         // if (!regs.crep) {
         //     regs.repc = regs.repcs;
@@ -1432,31 +1447,43 @@ public:
         c.and_(ax, ~decltype(Mod0::ps0)::mask);
         c.or_(ax, mask);
         c.mov(word[REGS + offsetof(JitRegisters, mod0)], ax);
-        blk_key.mod0.ps0.Assign(a.Unsigned16());
+        blk_key.curr.mod0.ps0.Assign(a.Unsigned16());
     }
     void load_stepi(Imm7s a) {
         // Although this is signed, we still only store the lower 7 bits
         const u8 stepi = static_cast<u8>(a.Signed16() & 0x7F);
-        c.mov(byte[REGS + offsetof(JitRegisters, stepi)], stepi);
-        blk_key.stepi = stepi;
+        c.mov(ax, word[REGS + offsetof(JitRegisters, cfgi)]);
+        c.and_(ax, ~decltype(Cfg::step)::mask);
+        c.or_(ax, stepi);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgi)], ax);
+        blk_key.curr.cfgi.step.Assign(stepi);
     }
     void load_stepj(Imm7s a) {
         const u8 stepj = static_cast<u8>(a.Signed16() & 0x7F);
-        c.mov(byte[REGS + offsetof(JitRegisters, stepj)], stepj);
-        blk_key.stepj = stepj;
+        c.mov(ax, word[REGS + offsetof(JitRegisters, cfgj)]);
+        c.and_(ax, ~decltype(Cfg::step)::mask);
+        c.or_(ax, stepj);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgj)], ax);
+        blk_key.curr.cfgj.step.Assign(stepj);
     }
     void load_page(Imm8 a) {
         const u8 page = static_cast<u8>(a.Unsigned16());
         c.mov(byte[REGS + offsetof(JitRegisters, mod1)], page);
-        blk_key.mod1.page.Assign(page);
+        blk_key.curr.mod1.page.Assign(page);
     }
     void load_modi(Imm9 a) {
-        c.mov(word[REGS + offsetof(JitRegisters, modi)], a.Unsigned16());
-        blk_key.modi = a.Unsigned16();
+        c.mov(ax, word[REGS + offsetof(JitRegisters, cfgi)]);
+        c.and_(ax, ~decltype(Cfg::mod)::mask);
+        c.or_(ax, a.Unsigned16() << decltype(Cfg::mod)::position);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgi)], ax);
+        blk_key.curr.cfgi.mod.Assign(a.Unsigned16());
     }
     void load_modj(Imm9 a) {
-        c.mov(word[REGS + offsetof(JitRegisters, modj)], a.Unsigned16());
-        blk_key.modj = a.Unsigned16();
+        c.mov(ax, word[REGS + offsetof(JitRegisters, cfgj)]);
+        c.and_(ax, ~decltype(Cfg::mod)::mask);
+        c.or_(ax, a.Unsigned16() << decltype(Cfg::mod)::position);
+        c.mov(word[REGS + offsetof(JitRegisters, cfgj)], ax);
+        blk_key.curr.cfgj.mod.Assign(a.Unsigned16());
     }
     void load_movpd(Imm2 a) {
         c.mov(word[REGS + offsetof(JitRegisters, pcmhi)], a.Unsigned16());
@@ -1467,8 +1494,8 @@ public:
         c.and_(ax, ~(decltype(Mod0::ps0)::mask | decltype(Mod0::ps1)::mask));
         c.or_(ax, mask);
         c.mov(word[REGS + offsetof(JitRegisters, mod0)], ax);
-        blk_key.mod0.ps0.Assign(a.Unsigned16() & 3);
-        blk_key.mod0.ps1.Assign(a.Unsigned16() >> 2);
+        blk_key.curr.mod0.ps0.Assign(a.Unsigned16() & 3);
+        blk_key.curr.mod0.ps1.Assign(a.Unsigned16() >> 2);
     }
 
     void push(Imm16 a) {
@@ -1708,7 +1735,7 @@ public:
     }
 
     void StoreToMemory(MemImm8 addr, Reg64 value) {
-        StoreToMemory(addr.Unsigned16() + (blk_key.mod1.page << 8), value);
+        StoreToMemory(addr.Unsigned16() + (blk_key.curr.mod1.page << 8), value);
     }
 
     template <typename T1, typename T2>
@@ -1864,12 +1891,12 @@ public:
     void mov_stepi0(Imm16 a) {
         u16 value = a.Unsigned16();
         c.mov(word[REGS + offsetof(JitRegisters, stepi0)], value);
-        blk_key.stepi0 = value;
+        blk_key.curr.stepi0 = value;
     }
     void mov_stepj0(Imm16 a) {
         u16 value = a.Unsigned16();
         c.mov(word[REGS + offsetof(JitRegisters, stepj0)], value);
-        blk_key.stepj0 = value;
+        blk_key.curr.stepj0 = value;
     }
     void mov(Imm16 a, SttMod b) {
         const u16 value = a.Unsigned16();
@@ -2566,15 +2593,15 @@ private:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value);
             break;
         case RegName::mod0:
-            blk_key.mod0.raw = value;
+            blk_key.curr.mod0.raw = value;
             regs.SetMod0(c, value);
             break;
         case RegName::mod1:
-            blk_key.mod1.raw = value;
+            blk_key.curr.mod1.raw = value;
             regs.SetMod1(c, value);
             break;
         case RegName::mod2:
-            blk_key.mod2.raw = value;
+            blk_key.curr.mod2.raw = value;
             regs.SetMod2(c, value);
             break;
         case RegName::mod3:
@@ -2582,39 +2609,37 @@ private:
             break;
 
         case RegName::cfgi:
-            blk_key.modi = Cfg{value}.mod;
-            blk_key.stepi = Cfg{value}.step;
+            blk_key.curr.cfgi.raw = value;
             regs.SetCfgi(c, value);
             break;
         case RegName::cfgj:
-            blk_key.modj = Cfg{value}.mod;
-            blk_key.stepj = Cfg{value}.step;
+            blk_key.curr.cfgj.raw = value;
             regs.SetCfgj(c, value);
             break;
 
         case RegName::ar0:
-            blk_key.ar[0].raw = value;
+            blk_key.curr.ar[0].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, ar)], value);
             break;
         case RegName::ar1:
-            blk_key.ar[1].raw = value;
+            blk_key.curr.ar[1].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, ar) + sizeof(u16)], value);
             break;
 
         case RegName::arp0:
-            blk_key.arp[0].raw = value;
+            blk_key.curr.arp[0].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, arp)], value);
             break;
         case RegName::arp1:
-            blk_key.arp[1].raw = value;
+            blk_key.curr.arp[1].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16)], value);
             break;
         case RegName::arp2:
-            blk_key.arp[2].raw = value;
+            blk_key.curr.arp[2].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 2], value);
             break;
         case RegName::arp3:
-            blk_key.arp[3].raw = value;
+            blk_key.curr.arp[3].raw = value;
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 3], value);
             break;
 
@@ -2747,7 +2772,7 @@ private:
     template <typename T>
     void SatAndSetAccAndFlag(RegName name, T value) {
         SetAccFlag(value);
-        if (!blk_key.mod0.sata) {
+        if (!blk_key.curr.mod0.sata) {
             SaturateAcc(value);
         }
         SetAcc(name, value);
@@ -2760,7 +2785,7 @@ private:
 
     void GetAndSatAcc(Reg64 out, RegName name) {
         GetAcc(out, name);
-        if (!blk_key.mod0.sat) {
+        if (!blk_key.curr.mod0.sat) {
             SaturateAcc(out);
         }
     }
@@ -2770,7 +2795,7 @@ private:
         c.mov(value.cvt16(), word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit]);
         c.shl(value, 32);
         c.mov(value.cvt32(), dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit]);
-        switch (unit == 0 ? blk_key.mod0.ps0.Value() : blk_key.mod0.ps1.Value()) {
+        switch (unit == 0 ? blk_key.curr.mod0.ps0.Value() : blk_key.curr.mod0.ps1.Value()) {
         case 0:
             SignExtend(value, 33);
             break;
@@ -2823,11 +2848,11 @@ private:
             printf("Failed part 7 of checks\n");
             result = false;
         }
-        if (!(regs.sp == iregs.sp && regs.mod1.page == iregs.page && regs.pcmhi == iregs.pcmhi && regs.stepi == iregs.stepi && regs.stepj == iregs.stepj)) {
+        if (!(regs.sp == iregs.sp && regs.mod1.page == iregs.page && regs.pcmhi == iregs.pcmhi && regs.cfgi.step == iregs.stepi && regs.cfgj.step == iregs.stepj)) {
             printf("Failed part 8 of checks\n");
             result = false;
         }
-        if (!(regs.modi == iregs.modi && regs.modj == iregs.modj && regs.stepi0 == iregs.stepi0 && regs.stepj0 == iregs.stepj0 && regs.mod1.stp16 == iregs.stp16)) {
+        if (!(regs.cfgi.mod == iregs.modi && regs.cfgj.mod == iregs.modj && regs.stepi0 == iregs.stepi0 && regs.stepj0 == iregs.stepj0 && regs.mod1.stp16 == iregs.stp16)) {
             printf("Failed part 9 of checks\n");
             result = false;
         }
