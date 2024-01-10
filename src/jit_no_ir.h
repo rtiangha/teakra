@@ -22,6 +22,8 @@
 
 namespace Teakra {
 
+constexpr size_t MAX_CODE_SIZE = 4 * 1024 * 1024;
+
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
     s64 cycles_to_run;
@@ -30,7 +32,7 @@ struct alignas(16) StackLayout {
 class EmitX64 {
 public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
-        : core_timing(core_timing), regs(regs), mem(mem), interp(core_timing, iregs, mem) {
+        : core_timing(core_timing), regs(regs), mem(mem), interp(core_timing, iregs, mem), c(MAX_CODE_SIZE) {
         EmitDispatcher();
     }
 
@@ -231,9 +233,9 @@ public:
 
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
-            //if (regs.pc == 0x00005036) {
-            //    compiling = false;
-            //}
+            if (regs.pc == 0x0000697F) {
+                compiling = false;
+            }
         }
 
         // Flush block state
@@ -399,7 +401,7 @@ public:
         c.mov(dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit], x);
         if (x_sign || y_sign) {
             c.bt(x, 31);
-            c.setnz(x.cvt16());
+            c.setc(x.cvt16());
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], x.cvt16());
         } else {
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], 0);
@@ -519,6 +521,7 @@ public:
             SignExtend(a, 32);
             break;
         default:
+            c.movzx(a.cvt64(), a.cvt16());
             break;
         }
     }
@@ -584,7 +587,9 @@ public:
         UNREACHABLE();
     }
     void alu(Alu op, Imm16 a, Ax b) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        c.mov(rbx, ExtendOperandForAlm(op.GetName(), value));
+        AlmGeneric(op.GetName(), rbx, b);
     }
     void alu(Alu op, Imm8 a, Ax b) {
         u16 value = a.Unsigned16();
@@ -1060,7 +1065,7 @@ public:
                 // regs.fc0 = (value & ((u64)1 << 40)) != 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
                 c.bt(value, 40);
-                c.setnz(cl); // u32 mask = (value & ((u64)1 << 40));
+                c.setc(cl); // u32 mask = (value & ((u64)1 << 40));
                 c.shl(cl, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
                 c.or_(FLAGS, cl);
             }
@@ -1080,7 +1085,7 @@ public:
                 // regs.fc0 = (value & ((u64)1 << (nsv - 1))) != 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
                 c.bt(value, nsv - 1);
-                c.setnz(cl); // u32 mask = (value & ((u64)1 << (nsv - 1)));
+                c.setc(cl); // u32 mask = (value & ((u64)1 << (nsv - 1)));
                 c.shl(cx, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
                 c.or_(FLAGS, cx);
                 c.shr(value, nsv); // value >>= nsv;
@@ -1106,6 +1111,21 @@ public:
         SetAcc(dest, value);
     }
 
+    static void PrintValue(u64 value) {
+        printf("jit: 0x%lx\n", value);
+    }
+
+    void EmitPrint(Reg64 value) {
+        c.push(rax);
+        c.push(rbx);
+        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.mov(ABI_PARAM1, value);
+        CallFarFunction(c, PrintValue);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.pop(rbx);
+        c.pop(rax);
+    }
+
     void AddSub(Reg64 a, Reg64 b, Reg64 result, bool sub) {
         c.mov(rsi, 0xFF'FFFF'FFFF);
         c.and_(a, rsi);
@@ -1119,7 +1139,7 @@ public:
         c.and_(FLAGS, ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
         c.xor_(rsi, rsi);
         c.bt(result, 40);
-        c.setnz(rsi.cvt8());
+        c.setc(rsi.cvt8());
         c.shl(rsi, decltype(Flags::fc0)::position);
         c.or_(FLAGS, rsi.cvt16()); // regs.fc0 = (result >> 40) & 1;
         if (sub) {
@@ -1130,9 +1150,9 @@ public:
         c.xor_(a, result);
         c.and_(a, b);
         c.bt(a, 39); // ((~(a ^ b) & (a ^ result)) >> 39) & 1;
-        c.setnz(rsi.cvt8());
+        c.setc(rsi.cvt8());
         c.shl(rsi, decltype(Flags::fv)::position);
-        c.or_(FLAGS, rsi);
+        c.or_(FLAGS, rsi.cvt16());
         // if (regs.fv) {
         //     regs.fvl = 1;
         // }
@@ -1171,11 +1191,11 @@ public:
                 c.mov(rbx, 0xFF'FFFF'FFFF); // Maybe use BZHI?
                 c.and_(acc, rbx);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setnz(rbx); // u16 old_fc = regs.fc0;
+                c.setc(rbx); // u16 old_fc = regs.fc0;
                 c.shl(rbx, 40);
                 c.or_(acc, rbx); // value |= (u64)old_fc << 40;
                 c.bt(acc, 1); // u32 mask = value & 1;
-                c.setnz(rbx); // mask <<= fc0_pos;
+                c.setc(rbx); // mask <<= fc0_pos;
                 c.shl(rbx, decltype(Flags::fc0)::position);
                 c.or_(FLAGS, rbx); // flags |= mask;
                 c.shr(acc, 1); // value >>= 1;
@@ -1186,11 +1206,11 @@ public:
             case ModaOp::Rol: {
                 GetAcc(acc, a);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setnz(rbx); // u16 old_fc = regs.fc0;
+                c.setc(rbx); // u16 old_fc = regs.fc0;
                 c.shl(acc, 1); // value <<= 1;
                 c.or_(acc, rbx); // value |= old_fc;
                 c.bt(acc, 40);
-                c.setnz(rbx);
+                c.setc(rbx);
                 c.shl(rbx, decltype(Flags::fc0)::position);
                 c.or_(FLAGS, rbx); // regs.fc0 = (value >> 40) & 1;
                 SignExtend(acc, 40);
@@ -1370,7 +1390,7 @@ public:
     }
 
     void cntx_s() {
-        regs.ShadowStore(c, eax);
+        regs.ShadowStore(c);
         regs.ShadowSwap(c);
         std::swap(blk_key.curr, blk_key.shadow);
         // if (!regs.crep) {
@@ -1394,7 +1414,7 @@ public:
         c.L(end_label);
     }
     void cntx_r() {
-        regs.ShadowRestore(c, eax);
+        regs.ShadowRestore(c);
         regs.ShadowSwap(c);
         std::swap(blk_key.curr, blk_key.shadow);
 
@@ -1411,6 +1431,7 @@ public:
         c.jnz(ccnta_label);
         c.mov(A[1], qword[REGS + offsetof(JitRegisters, a1s)]);
         c.mov(B[1], qword[REGS + offsetof(JitRegisters, b1s)]);
+        c.jmp(end_label);
         c.L(ccnta_label);
         c.xchg(A[1], B[1]);
         c.L(end_label);
@@ -1502,7 +1523,13 @@ public:
         UNREACHABLE();
     }
     void push(Register a) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value, true);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push(Abe a) {
         UNREACHABLE();
@@ -2470,6 +2497,7 @@ private:
 
         case RegName::r0:
             c.movzx(out, R0_1_2_3.cvt16());
+            break;
         case RegName::r1:
         case RegName::r2:
         case RegName::r3:
@@ -2477,14 +2505,21 @@ private:
             break;
         case RegName::r4:
             c.movzx(out, R4_5_6_7.cvt16());
+            break;
         case RegName::r5:
         case RegName::r6:
         case RegName::r7:
+            UNREACHABLE();
+            break;
+        case RegName::y0:
+            c.mov(out, FACTORS);
+            c.shr(out, 32);
+            break;
         case RegName::sp:
             c.movzx(out, word[REGS + offsetof(JitRegisters, sp)]);
             break;
         case RegName::mod0:
-            regs.GetMod0(c, out.cvt16());
+            UNREACHABLE();
             break;
         default:
             UNREACHABLE();
@@ -2524,8 +2559,16 @@ private:
 
     void RegFromBus16(RegName reg, Reg64 value) {
         switch (reg) {
+        case RegName::a0:
+        case RegName::a1:
+        case RegName::b0:
+        case RegName::b1:
+            SignExtend(value, 16);
+            SatAndSetAccAndFlag(reg, value);
+            break;
         case RegName::st1:
-            regs.SetSt1(c, esi, value);
+            regs.SetSt1(c, value, blk_key.curr.mod0, blk_key.curr.mod1);
+            compiling = false; // Modifies static state, end block
             break;
         case RegName::sp:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value.cvt16());
@@ -2538,14 +2581,8 @@ private:
     void RegFromBus16(RegName reg, u16 value) {
         switch (reg) {
         case RegName::a0:
-            SatAndSetAccAndFlag(reg, ::SignExtend<16, u64>(value));
-            break;
         case RegName::a1:
-            SatAndSetAccAndFlag(reg, ::SignExtend<16, u64>(value));
-            break;
         case RegName::b0:
-            SatAndSetAccAndFlag(reg, ::SignExtend<16, u64>(value));
-            break;
         case RegName::b1:
             SatAndSetAccAndFlag(reg, ::SignExtend<16, u64>(value));
             break;
@@ -2589,6 +2626,13 @@ private:
         case RegName::r7:
             UNREACHABLE();
             break;
+
+        case RegName::y0:
+            c.rorx(FACTORS, FACTORS, 32);
+            c.mov(FACTORS.cvt16(), value);
+            c.rorx(FACTORS, FACTORS, 32);
+            break;
+
         case RegName::sp:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value);
             break;
@@ -2615,6 +2659,16 @@ private:
         case RegName::cfgj:
             blk_key.curr.cfgj.raw = value;
             regs.SetCfgj(c, value);
+            break;
+
+        case RegName::st0:
+            regs.SetSt0(c, value, blk_key.curr.mod0);
+            break;
+        case RegName::st1:
+            regs.SetSt1(c, value, blk_key.curr.mod0, blk_key.curr.mod1);
+            break;
+        case RegName::st2:
+            regs.SetSt2(c, value, blk_key.curr.mod0, blk_key.curr.mod2);
             break;
 
         case RegName::ar0:
@@ -2670,19 +2724,19 @@ private:
             c.test(scratch, scratch);
             c.setnz(scratch.cvt8());
             c.shl(scratch, decltype(Flags::fm)::position);
-            c.or_(FLAGS, scratch.cvt8());
+            c.or_(FLAGS.cvt8(), scratch.cvt8());
             // regs.fe = value != SignExtend<32>(value);
             c.movsxd(scratch, value.cvt32());
             c.cmp(scratch, value);
             c.setne(scratch.cvt8());
             c.shl(scratch, decltype(Flags::fe)::position);
-            c.or_(FLAGS, scratch.cvt8());
+            c.or_(FLAGS.cvt8(), scratch.cvt8());
             c.shl(scratch, 16 - decltype(Flags::fe)::position);
             c.btc(scratch, 16);
             c.bt(value, 31);  // u64 bit31 = (value >> 31) & 1;
-            c.setnz(dl);
+            c.setc(dl);
             c.bt(value, 30); // u64 bit30 = (value >> 30) & 1;
-            c.setnz(dh);
+            c.setc(dh);
             c.xor_(dh, dl);
             c.shr(scratch, 8);
             c.and_(scratch, 0x101);

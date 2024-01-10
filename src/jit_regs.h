@@ -47,6 +47,7 @@ union Flags {
     BitField<7, 1, u16> fm; // negative flag
     BitField<8, 1, u16> fz; // zero flag
     BitField<12, 1, u16> fc1; // another carry flag
+    BitField<0, 9, u16> st0_flags; // flags to clear when being set from st0
 };
 
 union ArU {
@@ -75,7 +76,7 @@ union Mod0 {
         sata.Assign(1);
     }
 
-    u16 raw;
+    u16 raw{0};
     BitField<0, 1, u16> sat; // 1-bit, disable saturation when moving from acc
     BitField<1, 1, u16> sata; // 1-bit, disable saturation when moving to acc
     BitField<2, 3, u16> mod0_unk_const; // = 1, read only
@@ -92,7 +93,7 @@ union Mod1 {
         cmd.Assign(1);
     }
 
-    u16 raw;
+    u16 raw{0};
     BitField<0, 8, u16> page; // 8-bit, higher part of MemImm8 address
     BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in banke, and use
                                 // stepi0/j0 for steping
@@ -102,7 +103,7 @@ union Mod1 {
 };
 
 union Mod2 {
-    u16 raw;
+    u16 raw{0};
     BitField<0, 1, u16> m0; // 1-bit each, enable modulo arithmetic for Rn
     BitField<1, 1, u16> m1;
     BitField<2, 1, u16> m2;
@@ -119,11 +120,12 @@ union Mod2 {
     BitField<13, 1, u16> br5;
     BitField<14, 1, u16> br6;
     BitField<15, 1, u16> br7;
+    BitField<0, 6, u16> m1_5;
 };
 
 // Note: This registers owns none of its members
 union Mod3 {
-    u16 raw;
+    u16 raw{0};
     BitField<0, 1, u16> nimc;
     BitField<1, 1, u16> ic0;
     BitField<2, 1, u16> ic1;
@@ -186,10 +188,61 @@ union Stt1 {
     BitField<15, 1, u16> pe1;
 };
 
+union St0 {
+    u16 raw;
+    BitField<0, 1, u16> sat;
+    BitField<1, 1, u16> ie;
+    BitField<2, 1, u16> im0;
+    BitField<3, 1, u16> im1;
+    BitField<4, 1, u16> fr;
+    BitField<5, 1, u16> flm_fvl;
+    BitField<6, 1, u16> fe;
+    BitField<7, 1, u16> fc0;
+    BitField<8, 1, u16> fv;
+    BitField<9, 1, u16> fn;
+    BitField<10, 1, u16> fm;
+    BitField<11, 1, u16> fz;
+    BitField<12, 4, u16> a0e_alias;
+    BitField<6, 6, u16> flags_upper;
+
+    u16 ToHostMask() const {
+        return fr.Value() | (flm_fvl.Value() << 1) | (flm_fvl.Value() << 2) | (flags_upper.Value() << 3);
+    }
+
+    u32 Im0Im1Mask() const {
+        return im0.Value() | (im1.Value() << 16);
+    }
+};
+
 union St1 {
+    u16 raw;
     BitField<0, 8, u16> page_alias;
     BitField<10, 2, u16> ps0_alias;
     BitField<12, 4, u16> a1e_alias;
+};
+
+union St2 {
+    u16 raw;
+    BitField<0, 1, u16> m0;
+    BitField<1, 1, u16> m1;
+    BitField<2, 1, u16> m2;
+    BitField<3, 1, u16> m3;
+    BitField<4, 1, u16> m4;
+    BitField<5, 1, u16> m5;
+    BitField<6, 1, u16> im2;
+    BitField<7, 1, u16> s;
+    BitField<8, 1, u16> ou0;
+    BitField<9, 1, u16> ou1;
+    BitField<10, 1, u16> iu0;
+    BitField<11, 1, u16> iu1;
+    BitField<13, 1, u16> ip2;
+    BitField<14, 1, u16> ip0;
+    BitField<15, 1, u16> ip1;
+    BitField<0, 6, u16> m1_5;
+
+    u16 IpMask() const {
+        return ip0.Value() | (static_cast<u64>(ip1.Value()) << 16) | (static_cast<u64>(ip2.Value()) << 32);
+    }
 };
 
 union Cfg {
@@ -200,6 +253,14 @@ union Cfg {
 };
 
 struct JitRegisters {
+    JitRegisters() {
+        mod0b.sata.Assign(0);
+        mod1b.cmd.Assign(0);
+        arp[0].arpoffseti.Assign(0);
+        arp[1].arpoffseti.Assign(1);
+        arp[2].arpoffseti.Assign(2);
+        arp[3].arpoffseti.Assign(0);
+    }
     void Reset() {
         *this = JitRegisters();
     }
@@ -292,13 +353,6 @@ struct JitRegisters {
     Cfg cfgib{}, cfgjb{};
     u16 stepi0b = 0, stepj0b = 0;
 
-    JitRegisters() {
-        arp[0].arpoffseti.Assign(0);
-        arp[1].arpoffseti.Assign(1);
-        arp[2].arpoffseti.Assign(2);
-        arp[3].arpoffseti.Assign(0);
-    }
-
     /** Indirect address unit **/
     std::array<ArpU, 4> arp{};
     std::array<ArU, 2> ar{};
@@ -313,6 +367,7 @@ struct JitRegisters {
 
     // interrupt pending bit
     std::array<u16, 3> ip{};
+    u16 pad5;
     u16 ipv = 0;
 
     // interrupt context switching bit
@@ -336,14 +391,12 @@ struct JitRegisters {
     std::array<u16, 3> imb{}; // interrupt enable bit
     u16 imvb = 0;
 
-    void ShadowStore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
-        c.mov(scratch, dword[REGS + offsetof(JitRegisters, flags)]);
-        c.mov(dword[REGS + offsetof(JitRegisters, flagsb)], scratch);
+    void ShadowStore(Xbyak::CodeGenerator& c) {
+        c.mov(word[REGS + offsetof(JitRegisters, flagsb)], FLAGS);
     }
 
-    void ShadowRestore(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch) {
-        c.mov(scratch, dword[REGS + offsetof(JitRegisters, flagsb)]);
-        c.mov(dword[REGS + offsetof(JitRegisters, flags)], scratch);
+    void ShadowRestore(Xbyak::CodeGenerator& c) {
+        c.mov(FLAGS, word[REGS + offsetof(JitRegisters, flagsb)]);
     }
 
     void SwapAllArArp(Xbyak::CodeGenerator& c) {
@@ -412,10 +465,6 @@ struct JitRegisters {
         }
     }
 
-    void GetMod0(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, mod0)]);
-    }
-
     template <typename T>
     void SetMod0(Xbyak::CodeGenerator& c, T value) {
         // mod0_unk_const is read only, always set it to 1
@@ -429,17 +478,9 @@ struct JitRegisters {
         c.mov(word[REGS + offsetof(JitRegisters, mod0)], value);
     }
 
-    void GetMod1(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, mod1)]);
-    }
-
     template <typename T>
     void SetMod1(Xbyak::CodeGenerator& c, T value) {
         c.mov(word[REGS + offsetof(JitRegisters, mod1)], value);
-    }
-
-    void GetMod2(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, mod2)]);
     }
 
     template <typename T>
@@ -447,40 +488,31 @@ struct JitRegisters {
         c.mov(word[REGS + offsetof(JitRegisters, mod2)], value);
     }
 
-    void GetSt0(Xbyak::CodeGenerator& c, Xbyak::Reg64 scratch, Xbyak::Reg16 out) {
-        /**
-         * using st0 = PseudoRegister< // Dynamic
-           ProxySlot<Redirector<&JitRegisters::sat>, 0, 1>,
-           ProxySlot<Redirector<&JitRegisters::ie>, 1, 1>,
-           ProxySlot<ArrayRedirector<3, &JitRegisters::im, 0>, 2, 1>,
-           ProxySlot<ArrayRedirector<3, &JitRegisters::im, 1>, 3, 1>,
-           ProxySlot<Redirector<&JitRegisters::fr>, 4, 1>,
-           ProxySlot<DoubleRedirector<&JitRegisters::flm, &JitRegisters::fvl>, 5, 1>,
-           ProxySlot<Redirector<&JitRegisters::fe>, 6, 1>,
-           ProxySlot<Redirector<&JitRegisters::fc0>, 7, 1>,
-           ProxySlot<Redirector<&JitRegisters::fv>, 8, 1>,
-           ProxySlot<Redirector<&JitRegisters::fn>, 9, 1>,
-           ProxySlot<Redirector<&JitRegisters::fm>, 10, 1>,
-           ProxySlot<Redirector<&JitRegisters::fz>, 11, 1>,
-           ProxySlot<AccEProxy<0>, 12, 4>
-           >;
-         **/
-        UNREACHABLE();
-        c.xor_(out, out);
+    template <typename T>
+    void SetSt0(Xbyak::CodeGenerator& c, T value, Mod0& mod0_const) {
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            UNREACHABLE();
+        } else {
+            const St0 reg{.raw = value};
 
-        // Load flags and handle fvl latch
-        //c.mov(scratch.cvt8(), byte[REGS + offsetof(JitRegisters, stt0)]);
-        c.mov(out.cvt8(), scratch.cvt8());
-        c.and_(out.cvt8(), 1);
-        c.shr(scratch.cvt8(), 1);
-        c.or_(out.cvt8(), scratch.cvt8());
-        c.shl(out.cvt16(), 5);
+            // Update flags.
+            c.and_(FLAGS, ~decltype(Flags::st0_flags)::mask);
+            c.or_(FLAGS, reg.ToHostMask());
 
-        // Load a0e and place it in out.
-        c.mov(scratch, A[0]);
-        c.shr(scratch, 32);
-        c.shl(scratch.cvt16(), 12);
-        c.or_(out.cvt16(), scratch.cvt16()); // out |= (a0e << 12)
+            // Set ie and im0/im1
+            c.mov(word[REGS + offsetof(JitRegisters, ie)], reg.ie.Value());
+            c.mov(dword[REGS + offsetof(JitRegisters, im)], reg.Im0Im1Mask());
+
+            // Update sat field of mod0
+            mod0_const.sat.Assign(reg.sat.Value());
+            c.mov(word[REGS + offsetof(JitRegisters, mod0)], mod0_const.raw);
+
+            // Replace upper word of a[0] with sign extended a0e.
+            const u64 value32 = SignExtend<4, u32>(reg.a0e_alias.Value());
+            c.mov(rsi, value32 << 32);
+            c.mov(rsi.cvt32(), A[0].cvt32());
+            c.mov(A[0], rsi);
+        }
     }
 
     void GetSt1(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch, Xbyak::Reg16 out) {
@@ -505,20 +537,22 @@ struct JitRegisters {
     }
 
     template <typename T>
-    void SetSt1(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch, T value) {
+    void SetSt1(Xbyak::CodeGenerator& c, T value, Mod0& mod0_const, Mod1& mod1_const) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            Mod0 mod0 = mod0_const;
+            mod0.ps0.Assign(0);
+            const u32 mod1mod0 = mod1_const.raw | (static_cast<u32>(mod0.raw) << 16);
+
             // Load mod1 and mod0 in a single 32-bit load
-            c.mov(scratch, dword[REGS + offsetof(JitRegisters, mod1)]);
-            // Copy to lower byte of mod1 which is page
-            c.mov(scratch.cvt8(), value.cvt8());
-            c.and_(value, ~0xFF);
+            c.mov(rsi.cvt32(), mod1mod0);
+            c.mov(rsi.cvt8(), value.cvt8());
 
             // Replace ps0 and store back
-            c.shl(value, 32 - decltype(St1::a1e_alias)::position);
+            c.shr(value, decltype(St1::ps0_alias)::position);
+            c.shl(value, 32 - decltype(St1::ps0_alias)::bits);
             c.shr(value.cvt32(), 4);
-            c.and_(scratch, ~0xC000000); // Clear existing ps0
-            c.or_(scratch, value.cvt32());
-            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], scratch);
+            c.or_(rsi, value.cvt32());
+            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], rsi);
 
             // Replace upper word of a[1] with sign extended a1e.
             c.shl(value, 32 - decltype(St1::a1e_alias)::bits);
@@ -526,23 +560,38 @@ struct JitRegisters {
             c.mov(value.cvt32(), A[1].cvt32());
             c.mov(A[1], value);
         } else {
-            const St1 reg{value};
-            // Load mod1 and mod0 in a single 32-bit load
-            c.mov(scratch, dword[REGS + offsetof(JitRegisters, mod1)]);
+            const St1 reg{.raw = value};
             // Copy to lower byte of mod1 which is page
-            c.mov(scratch.cvt8(), reg.page_alias.Value());
-
-            // Replace ps0 and store back
-            const u32 mask = static_cast<u32>(reg.ps0_alias.Value()) << 26;
-            c.and_(scratch, ~0xC000000); // Clear existing ps0
-            c.or_(scratch, mask);
-            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], scratch);
+            // Replace ps0 and store to both mod1 and mod0
+            mod1_const.page.Assign(reg.page_alias.Value());
+            mod0_const.ps0.Assign(reg.ps0_alias.Value());
+            const u32 value = mod1_const.raw | (static_cast<u32>(mod0_const.raw) << 16);
+            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], value);
 
             // Replace upper word of a[1] with sign extended a1e.
-            const u32 value32 = SignExtend<4, u32>(reg.a1e_alias.Value());
-            c.ror(A[1], 32);
-            c.mov(A[1].cvt32(), value32);
-            c.rol(A[1], 32);
+            const u64 value32 = SignExtend<4, u32>(reg.a1e_alias.Value());
+            c.mov(rsi, value32 << 32);
+            c.mov(rsi.cvt32(), A[1].cvt32());
+            c.mov(A[1], rsi);
+        }
+    }
+
+    template <typename T>
+    void SetSt2(Xbyak::CodeGenerator& c, T value, Mod0& mod0_const, Mod2& mod2_const) {
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            UNREACHABLE();
+        } else {
+            const St2 reg{.raw = value};
+
+            // Update mod0 and mod2
+            mod0_const.s.Assign(reg.s.Value());
+            mod2_const.m1_5.Assign(reg.m1_5.Value());
+
+            // Update im, ou, iu and ip
+            c.mov(word[REGS + offsetof(JitRegisters, im) + sizeof(u16) * 2], reg.im2.Value());
+            c.mov(dword[REGS + offsetof(JitRegisters, ou)], reg.ou0.Value() | (static_cast<u32>(reg.ou1.Value()) << 16));
+            c.mov(dword[REGS + offsetof(JitRegisters, iu)], reg.iu0.Value() | (static_cast<u32>(reg.iu1.Value()) << 16));
+            c.mov(qword[REGS + offsetof(JitRegisters, ip)], reg.IpMask());
         }
     }
 

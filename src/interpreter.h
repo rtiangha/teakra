@@ -300,6 +300,7 @@ public:
         a &= 0xFF'FFFF'FFFF;
         b &= 0xFF'FFFF'FFFF;
         u64 result = sub ? a - b : a + b;
+        printf("interp: 0x%lx\n", result);
         regs.fc0 = (result >> 40) & 1;
         if (sub)
             b = ~b;
