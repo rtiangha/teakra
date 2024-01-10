@@ -63,6 +63,7 @@ public:
     void DataWriteA32(u32 address, u16 value);
     u16 MMIORead(u16 address);
     void MMIOWrite(u16 address, u16 value);
+    SharedMemory& GetMemory() { return shared_memory; }
 
 private:
     SharedMemory& shared_memory;

@@ -1,4 +1,5 @@
 #pragma once
+#include "shared_memory.h"
 #pragma clang optimize off
 #include <utility>
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <xbyak/xbyak.h>
 #include "bit.h"
 #include <bit>
+#include <set>
 #include "core_timing.h"
 #include "decoder.h"
 #include "memory_interface.h"
@@ -72,6 +74,7 @@ public:
     s32 cycles_remaining;
     Xbyak::Label dispatcher_start;
     const std::vector<Matcher<EmitX64>> decoders = GetDecoderTable<EmitX64>();
+    std::set<u32> bkrep_end_locations;
     bool compiling = false;
     std::unordered_map<size_t, Block> code_blocks;
     Block* current_blk{};
@@ -215,7 +218,7 @@ public:
         c.mov(REGS, ABI_PARAM1);
         c.mov(R0_1_2_3, qword[REGS + offsetof(JitRegisters, r)]);
         c.mov(R4_5_6_7, qword[REGS + offsetof(JitRegisters, r) + sizeof(u16) * 4]);
-        c.mov(FACTORS, qword[REGS + offsetof(JitRegisters, x)]);
+        c.mov(FACTORS, qword[REGS + offsetof(JitRegisters, y)]);
         c.mov(A[0], qword[REGS + offsetof(JitRegisters, a)]);
         c.mov(A[1], qword[REGS + offsetof(JitRegisters, a) + sizeof(u64)]);
         c.mov(B[0], qword[REGS + offsetof(JitRegisters, b)]);
@@ -224,6 +227,7 @@ public:
 
         compiling = true;
         while (compiling) {
+            const u32 current_pc = regs.pc;
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
             auto& decoder = decoders[opcode];
             u16 expand_value = 0;
@@ -233,21 +237,59 @@ public:
 
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
-            if (regs.pc == 0x0000697F) {
-                compiling = false;
+
+            // Emit bkrep return.
+            if (bkrep_end_locations.contains(current_pc)) {
+                EmitBkrepReturn(current_pc, regs.pc);
             }
         }
 
         // Flush block state
         c.mov(qword[REGS + offsetof(JitRegisters, r)], R0_1_2_3);
         c.mov(qword[REGS + offsetof(JitRegisters, r) + sizeof(u16) * 4], R4_5_6_7);
-        c.mov(qword[REGS + offsetof(JitRegisters, x)], FACTORS);
+        c.mov(qword[REGS + offsetof(JitRegisters, y)], FACTORS);
         c.mov(qword[REGS + offsetof(JitRegisters, a)], A[0]);
         c.mov(qword[REGS + offsetof(JitRegisters, a) + sizeof(u64)], A[1]);
         c.mov(qword[REGS + offsetof(JitRegisters, b)], B[0]);
         c.mov(qword[REGS + offsetof(JitRegisters, b) + sizeof(u64)], B[1]);
         c.mov(dword[REGS + offsetof(JitRegisters, flags)], FLAGS);
         c.jmp(dispatcher_start);
+    }
+
+    void EmitBkrepReturn(u32 current_pc, u32 next_pc) {
+        using Frame = JitRegisters::BlockRepeatFrame;
+        // if (regs.lp && regs.bkrep_stack[regs.bcn - 1].end + 1 == regs.pc) {
+        //      if (regs.bkrep_stack[regs.bcn - 1].lc == 0) {
+        //         --regs.bcn;
+        //         regs.lp = regs.bcn != 0;
+        //      } else {
+        //         --regs.bkrep_stack[regs.bcn - 1].lc;
+        //         regs.pc = regs.bkrep_stack[regs.bcn - 1].start;
+        //      }
+        // }
+        Xbyak::Label end_label, jump_to_target;
+        const Reg64 bcn = rax;
+        c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
+        c.jz(end_label);
+        c.movzx(bcn, word[REGS + offsetof(JitRegisters, bcn)]);
+        c.sub(bcn, 1);
+        c.lea(rbx, ptr[bcn + bcn * 2]);
+        c.lea(rbx, ptr[REGS + offsetof(JitRegisters, bkrep_stack) + bcn * 4]);
+        c.cmp(dword[rbx + offsetof(Frame, end)], current_pc);
+        c.jne(end_label);
+        c.cmp(word[rbx + offsetof(Frame, lc)], 0);
+        c.jne(jump_to_target);
+        c.mov(word[REGS + offsetof(JitRegisters, bcn)], bcn.cvt16());
+        c.test(bcn, bcn);
+        c.setnz(byte[REGS + offsetof(JitRegisters, lp)]);
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], next_pc);
+        c.jmp(end_label);
+        c.L(jump_to_target);
+        c.sub(word[rbx + offsetof(Frame, lc)], 1);
+        c.mov(rbx.cvt32(), dword[rbx + offsetof(Frame, start)]);
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], rbx.cvt32());
+        c.L(end_label);
+        compiling = false;
     }
 
     void EmitPushPC() {
@@ -376,15 +418,15 @@ public:
     }
 
     void DoMultiplication(u32 unit, Reg32 x, Reg32 y, bool x_sign, bool y_sign) {
-        c.mov(y.cvt64(), FACTORS);
+        c.mov(x.cvt64(), FACTORS);
         if (unit == 0) {
-            c.movzx(x, FACTORS.cvt16());
-            c.shr(y.cvt64(), 32);
-            c.and_(y, 0xFFFF);
+            c.movzx(y, FACTORS.cvt16());
+            c.shr(x.cvt64(), 32);
+            c.and_(x, 0xFFFF);
         } else {
-            c.shr(y.cvt64(), 16);
-            c.movzx(x, y.cvt16());
-            c.shr(y.cvt64(), 32);
+            c.shr(x.cvt64(), 16);
+            c.movzx(y, x.cvt16());
+            c.shr(x.cvt64(), 32);
         }
         if (blk_key.curr.mod0.hwm == 1 || (blk_key.curr.mod0.hwm == 3 && unit == 0)) {
             c.shr(y, 8);
@@ -473,6 +515,7 @@ public:
             break;
         }
         case AlmOp::Msu: {
+            UNREACHABLE();
             GetAcc(value, b.GetName());
             const Reg64 product = rcx;
             ProductToBus40(product, Px{0});
@@ -480,7 +523,11 @@ public:
             AddSub(value, product, result, true);
             SatAndSetAccAndFlag(b.GetName(), result);
 
-            c.mov(FACTORS.cvt16(), a.cvt16()); // regs.x[0] = a & 0xFFFF;
+            c.shl(a, 48);
+            c.shr(a, 16);
+            c.mov(result, ~decltype(Factors::x0)::mask);
+            c.and_(FACTORS, result);
+            c.or_(FACTORS, a); // regs.x[0] = a & 0xFFFF;
             DoMultiplication(0, eax, ebx, true, true);
             break;
         }
@@ -494,6 +541,7 @@ public:
         }
         [[fallthrough]];
         case AlmOp::Sqr: {
+            printf("JIT Sqr\n");
             c.and_(a, 0xFFFF);
             c.mov(FACTORS.cvt16(), a.cvt16());
             c.ror(FACTORS, 32);
@@ -1260,7 +1308,7 @@ public:
                 GetAcc(acc, a);
                 c.mov(rbx, 1);
                 AddSub(acc, rbx, rcx, false);
-                SatAndSetAccAndFlag(a, acc);
+                SatAndSetAccAndFlag(a, rcx);
                 break;
             }
             case ModaOp::Dec: {
@@ -1301,11 +1349,32 @@ public:
         UNREACHABLE();
     }
 
+    void BlockRepeat(Reg64 lc, u32 address) {
+        using Frame = JitRegisters::BlockRepeatFrame;
+        static_assert(sizeof(Frame) == 12);
+        c.movzx(rbx, word[REGS + offsetof(JitRegisters, bcn)]);
+        c.lea(rcx, ptr[rbx + rbx * 2]);
+        c.lea(rcx, ptr[REGS + offsetof(JitRegisters, bkrep_stack) + rcx * 4]);
+        c.mov(dword[rcx + offsetof(Frame, start)], regs.pc);
+        c.mov(dword[rcx + offsetof(Frame, end)], address);
+        c.mov(word[rcx + offsetof(Frame, lc)], lc.cvt16());
+        c.add(rbx, 1);
+        c.or_(rbx, 1 << 16);
+        c.mov(dword[REGS + offsetof(JitRegisters, bcn)], rbx.cvt32());
+        static_assert(offsetof(JitRegisters, lp) - offsetof(JitRegisters, bcn) == sizeof(u16));
+        // TODO: Block linking so small loops dont go the dispatcher
+        bkrep_end_locations.insert(address);
+        compiling = false;
+    }
+
     void bkrep(Imm8 a, Address16 addr) {
         UNREACHABLE();
     }
     void bkrep(Register a, Address18_16 addr_low, Address18_2 addr_high) {
-        UNREACHABLE();
+        const Reg64 lc = rax;
+        RegToBus16(a.GetName(), lc);
+        u32 address = Address32(addr_low, addr_high);
+        BlockRepeat(lc, address);
     }
     void bkrep_r6(Address18_16 addr_low, Address18_2 addr_high) {
         UNREACHABLE();
@@ -1566,7 +1635,13 @@ public:
     }
 
     void pop(Register a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rax;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        RegFromBus16(a.GetName(), value);
     }
     void pop(Abe a) {
         UNREACHABLE();
@@ -1725,6 +1800,11 @@ public:
         UNREACHABLE();
     }
 
+    void ProgramRead(Reg64 out, Reg64 address) {
+        c.mov(out, reinterpret_cast<uintptr_t>(mem.GetMemory().raw.data()));
+        c.movzx(out, word[out + address * 2]);
+    }
+
     void movd(R0123 a, StepZIDS as, R45 b, StepZIDS bs) {
         UNREACHABLE();
     }
@@ -1732,7 +1812,12 @@ public:
         UNREACHABLE();
     }
     void movp(Ax a, Register b) {
-        UNREACHABLE();
+        const Reg64 address = rax;
+        GetAcc(address, a.GetName());
+        c.and_(address, 0x3FFFF);
+        const Reg64 value = rbx;
+        ProgramRead(value, address);
+        RegFromBus16(b.GetName(), value);
     }
     void movp(Rn a, StepZIDS as, R0123 b, StepZIDS bs) {
         UNREACHABLE();
@@ -1865,7 +1950,12 @@ public:
         UNREACHABLE();
     }
     void mov(Register a, Rn b, StepZIDS bs) {
-        UNREACHABLE();
+        // a = a0 or a1 is overrided
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value, true);
+        const Reg64 address = rbx;
+        RnAddressAndModify(b.Index(), bs.GetName(), rbx);
+        StoreToMemory(address, value);
     }
     void mov(Register a, Bx b) {
         UNREACHABLE();
@@ -2512,9 +2602,9 @@ private:
             UNREACHABLE();
             break;
         case RegName::y0:
-            c.mov(out, FACTORS);
-            c.shr(out, 32);
+            c.movzx(out, FACTORS.cvt16());
             break;
+
         case RegName::sp:
             c.movzx(out, word[REGS + offsetof(JitRegisters, sp)]);
             break;
@@ -2566,6 +2656,11 @@ private:
             SignExtend(value, 16);
             SatAndSetAccAndFlag(reg, value);
             break;
+
+        case RegName::r0:
+            c.mov(R0_1_2_3.cvt16(), value.cvt16());
+            break;
+
         case RegName::st1:
             regs.SetSt1(c, value, blk_key.curr.mod0, blk_key.curr.mod1);
             compiling = false; // Modifies static state, end block
@@ -2573,6 +2668,10 @@ private:
         case RegName::sp:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value.cvt16());
             break;
+        case RegName::y0:
+            c.mov(FACTORS.cvt16(), value.cvt16());
+            break;
+
         default:
             UNREACHABLE();
         }
@@ -2593,14 +2692,8 @@ private:
             SatAndSetAccAndFlag(reg, (u64)value);
             break;
         case RegName::a0h:
-            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
-            break;
         case RegName::a1h:
-            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
-            break;
         case RegName::b0h:
-            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
-            break;
         case RegName::b1h:
             SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
             break;
@@ -2628,9 +2721,7 @@ private:
             break;
 
         case RegName::y0:
-            c.rorx(FACTORS, FACTORS, 32);
             c.mov(FACTORS.cvt16(), value);
-            c.rorx(FACTORS, FACTORS, 32);
             break;
 
         case RegName::sp:
@@ -2868,7 +2959,204 @@ private:
         }
     }
 
+    void RnAddress(u32 unit, Reg64 value) {
+        if (blk_key.curr.mod2.IsBr(unit) && !blk_key.curr.mod2.IsM(unit)) {
+            UNREACHABLE();
+        }
+    }
+
+    void StepAddress(u32 unit, Reg16 address, StepValue step, bool dmod = false) {
+        u16 s;
+        bool legacy = blk_key.curr.mod1.cmd;
+        bool step2_mode1 = false;
+        bool step2_mode2 = false;
+        switch (step) {
+        case StepValue::Zero:
+            s = 0;
+            break;
+        case StepValue::Increase:
+            s = 1;
+            break;
+        case StepValue::Decrease:
+            s = 0xFFFF;
+            break;
+        // TODO: Increase/Decrease2Mode1/2 sometimes have wrong result if Offset=+/-1.
+        // This however never happens with modr instruction.
+        case StepValue::Increase2Mode1:
+            s = 2;
+            step2_mode1 = !legacy;
+            break;
+        case StepValue::Decrease2Mode1:
+            s = 0xFFFE;
+            step2_mode1 = !legacy;
+            break;
+        case StepValue::Increase2Mode2:
+            s = 2;
+            step2_mode2 = !legacy;
+            break;
+        case StepValue::Decrease2Mode2:
+            s = 0xFFFE;
+            step2_mode2 = !legacy;
+            break;
+        case StepValue::PlusStep: {
+            if (blk_key.curr.mod2.IsBr(unit) && !blk_key.curr.mod2.IsM(unit)) {
+                s = unit < 4 ? blk_key.curr.stepi0 : blk_key.curr.stepj0;
+            } else {
+                s = unit < 4 ? blk_key.curr.cfgi.step : blk_key.curr.cfgj.step;
+                s = ::SignExtend<7>(s);
+            }
+            if (blk_key.curr.mod1.stp16 == 1 && !legacy) {
+                s = unit < 4 ? regs.stepi0 : regs.stepj0;
+                if (blk_key.curr.mod2.IsM(unit)) {
+                    s = ::SignExtend<9>(s);
+                }
+            }
+            break;
+        }
+        default:
+            UNREACHABLE();
+        }
+
+        if (s == 0)
+            return;
+        if (!dmod && !blk_key.curr.mod2.IsBr(unit) && blk_key.curr.mod2.IsM(unit)) {
+            u16 mod = unit < 4 ? blk_key.curr.cfgi.mod : blk_key.curr.cfgj.mod;
+
+            if (mod == 0) {
+                return;
+            }
+
+            if (mod == 1 && step2_mode2) {
+                return;
+            }
+
+            u32 iteration = 1;
+            if (step2_mode1) {
+                iteration = 2;
+                s = ::SignExtend<15, u16>(s >> 1);
+            }
+
+            for (u32 i = 0; i < iteration; ++i) {
+                if (legacy || step2_mode2) {
+                    bool negative = false;
+                    u16 m = mod;
+                    if (s >> 15) {
+                        negative = true;
+                        m |= ~s;
+                    } else {
+                        m |= s;
+                    }
+
+                    u16 mask = (1 << std20::log2p1(m)) - 1;
+                    const Reg16 scratch = rsi.cvt16();
+                    const Reg16 next = rdx.cvt16();
+                    if (!negative) {
+                        if (!((!step2_mode2 || mod != mask))) {
+                            c.mov(next, address);
+                            c.add(next, s);
+                            c.and_(next, mask);
+                        } else {
+                            c.mov(next, address);
+                            c.add(next, s);
+                            c.and_(next, mask);
+                            c.mov(scratch, address);
+                            c.and_(scratch, mask);
+                            c.cmp(scratch, mod);
+                            c.xor_(scratch, scratch);
+                            c.cmove(next, scratch);
+                        }
+                    } else {
+                        if (!((!step2_mode2 || mod != mask))) {
+                            c.mov(next, address);
+                            c.add(next, s);
+                            c.and_(next, mask);
+                        } else {
+                            c.mov(next, address);
+                            c.add(next, s);
+                            c.and_(next, mask);
+                            c.mov(scratch, mod);
+                            c.test(address, mask);
+                            c.cmovz(next, scratch);
+                        }
+                    }
+                    c.and_(address, ~mask);
+                    c.or_(address, next);
+                } else {
+                    u16 mask = (1 << std20::log2p1(mod)) - 1;
+                    const Reg16 scratch = rsi.cvt16();
+                    const Reg16 next = rdx.cvt16();
+                    if (s < 0x8000) {
+                        c.mov(next, address);
+                        c.add(next, s);
+                        c.and_(next, mask);
+                        c.xor_(scratch, scratch);
+                        c.cmp(next, (mod + 1) & mask);
+                        c.cmove(next, scratch);
+                    } else {
+                        c.mov(next, address);
+                        c.and_(next, mask);
+                        c.mov(scratch, mod + 1);
+                        c.test(next, next);
+                        c.cmovz(next, scratch);
+                        c.add(next, s);
+                        c.and_(next, mask);
+                    }
+                    c.and_(address, ~mask);
+                    c.or_(address, next);
+                }
+            }
+        } else {
+            c.add(address, s);
+        }
+    }
+
+    void RnAndModify(u32 unit, StepValue step, Reg64 out, bool dmod = false) {
+        switch (unit) {
+        case 0:
+            c.movzx(out, R0_1_2_3.cvt16());
+            break;
+        case 4:
+            c.movzx(out, R4_5_6_7.cvt16());
+            break;
+        default:
+            UNREACHABLE();
+        }
+
+        if ((unit == 3 && blk_key.curr.mod1.epi) || (unit == 7 && blk_key.curr.mod1.epj)) {
+            if (step != StepValue::Increase2Mode1 && step != StepValue::Decrease2Mode1 &&
+                step != StepValue::Increase2Mode2 && step != StepValue::Decrease2Mode2) {
+                switch (unit) {
+                case 0:
+                    c.xor_(R0_1_2_3.cvt16(), R0_1_2_3.cvt16());
+                    break;
+                case 4:
+                    c.xor_(R4_5_6_7.cvt16(), R4_5_6_7.cvt16());
+                    break;
+                default:
+                    UNREACHABLE();
+                }
+                return;
+            }
+        }
+        switch (unit) {
+        case 0:
+            StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            break;
+        case 4:
+            StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            break;
+        default:
+            UNREACHABLE();
+        }
+    }
+
+    void RnAddressAndModify(u32 unit, StepValue step, Reg64 out, bool dmod = false) {
+        RnAndModify(unit, step, out, dmod);
+        RnAddress(unit, out);
+    }
+
     bool CompareRegisterState() {
+        using Frame = JitRegisters::BlockRepeatFrame;
         bool result = true;
         if (!(regs.pc == iregs.pc && regs.r == iregs.r && regs.cpc == iregs.cpc && regs.prpage == iregs.prpage && regs.repc == iregs.repc && regs.repcs == iregs.repcs)) {
             printf("Failed part 0 of checks\n");
@@ -2878,7 +3166,7 @@ private:
             printf("Failed part 1 of checks\n");
             result = false;
         }
-        if (!(regs.rep == iregs.rep && regs.crep == iregs.crep && regs.bcn == iregs.bcn && regs.lp == iregs.lp && regs.a == iregs.a && regs.b == iregs.b)) {
+        if (!(regs.rep == iregs.rep && regs.crep == iregs.crep && regs.a == iregs.a && regs.b == iregs.b)) {
             printf("Failed part 2 of checks\n");
             result = false;
         }
@@ -2912,6 +3200,10 @@ private:
         }
         if (!(regs.mod1.cmd == iregs.cmd && regs.mod1.epi == iregs.epi && regs.mod1.epj == iregs.epj)) {
             printf("Failed part 10 of checks\n");
+            result = false;
+        }
+        if (!(regs.lp == iregs.lp && regs.bcn == iregs.bcn && std::memcmp(&regs.bkrep_stack, &iregs.bkrep_stack, sizeof(Frame)) == 0)) {
+            printf("Failed part 11 of checks\n");
             result = false;
         }
         return result;

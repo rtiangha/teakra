@@ -25,7 +25,7 @@ constexpr Reg64 R4_5_6_7 = r9;
 /// XpertTeak accumulators
 constexpr Reg64 A[] = {r10, r11};
 constexpr Reg64 B[] = {r12, r13};
-/// Holds multiplication factor registers x0/x1/y0/y1.
+/// Holds multiplication factor registers y0/y1/x0/x1.
 constexpr Reg64 FACTORS = r14;
 /// Holds the register structure pointer
 constexpr Reg64 REGS = r15;
@@ -48,6 +48,14 @@ union Flags {
     BitField<8, 1, u16> fz; // zero flag
     BitField<12, 1, u16> fc1; // another carry flag
     BitField<0, 9, u16> st0_flags; // flags to clear when being set from st0
+};
+
+union Factors {
+    u64 raw;
+    BitField<0, 16, u64> y0;
+    BitField<16, 16, u64> y1;
+    BitField<32, 16, u64> x0;
+    BitField<48, 16, u64> x1;
 };
 
 union ArU {
@@ -121,6 +129,14 @@ union Mod2 {
     BitField<14, 1, u16> br6;
     BitField<15, 1, u16> br7;
     BitField<0, 6, u16> m1_5;
+
+    bool IsBr(u32 unit) const {
+        return raw & (1 << (unit + decltype(br0)::position));
+    }
+
+    bool IsM(u32 unit) const {
+        return raw & (1 << (unit + decltype(m0)::position));
+    }
 };
 
 // Note: This registers owns none of its members
@@ -286,10 +302,13 @@ struct JitRegisters {
     };
 
     std::array<BlockRepeatFrame, 4> bkrep_stack;
-    u16& Lc() {
-        if (lp)
-            return bkrep_stack[bcn - 1].lc;
-        return bkrep_stack[0].lc;
+
+    void GetLc(Xbyak::CodeGenerator& c, Reg64 out) {
+        c.mov(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
+        c.movzx(rsi, word[REGS + offsetof(JitRegisters, bcn)]);
+        c.sub(rsi, 1);
+        c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
+        c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + rsi * sizeof(BlockRepeatFrame) + offsetof(BlockRepeatFrame, lc)]);
     }
 
     /** Computation unit **/
@@ -327,8 +346,8 @@ struct JitRegisters {
 
     /** Multiplication unit **/
 
-    std::array<u16, 2> x{};  // factor
     std::array<u16, 2> y{};  // factor
+    std::array<u16, 2> x{};  // factor
     std::array<u32, 2> p{};  // product
     std::array<u16, 2> pe{}; // 1-bit product extension
     u16 p0h_cbs = 0;         // 16-bit hidden state for codebook search (CBS) opcode
