@@ -139,7 +139,7 @@ union Mod2 {
     }
 };
 
-// Note: This registers owns none of its members
+// Note: This register owns none of its members
 union Mod3 {
     u16 raw{0};
     BitField<0, 1, u16> nimc;
@@ -167,6 +167,13 @@ union Mod3 {
 
     u32 OuDword() const {
         return ou2.Value() | (static_cast<u32>(ou3.Value()) << 16);
+    }
+
+    u64 OuIeQword() const {
+        return ou2.Value()
+        | (static_cast<u64>(ou3.Value()) << 16)
+        | (static_cast<u64>(ou4.Value()) << 32)
+        | (static_cast<u64>(ie.Value()) << 48);
     }
 
     u64 ImQword() const {
@@ -268,6 +275,7 @@ union Cfg {
     BitField<7, 9, u16> mod;
 };
 
+// NOTE: The jit relies heavily on the member order, do not swap!
 struct JitRegisters {
     JitRegisters() {
         mod0b.sata.Assign(0);
@@ -393,12 +401,11 @@ struct JitRegisters {
     u16 nimc = 0;
     std::array<u16, 3> ic{};
 
-    // interrupt enable master bit
-    u16 ie = 0;
-
     /** Extension unit **/
 
     std::array<u16, 5> ou{}; // user output pins
+    // interrupt enable master bit
+    u16 ie = 0;
     std::array<u16, 2> iu{}; // user input pins
     std::array<u16, 4> ext{};
 
@@ -614,17 +621,81 @@ struct JitRegisters {
         }
     }
 
+    void GetMod3(Xbyak::CodeGenerator& c, Xbyak::Reg64 out) {
+        // TODO: Use pext, my laptop is Zen 2 :<
+        c.xor_(out, out);
+        c.mov(rsi, qword[REGS + offsetof(JitRegisters, nimc)]);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8()); // nimc-ic2
+
+        c.mov(rsi, qword[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 2]);
+        c.shl(rsi, 4);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8()); // ou2-ie
+
+        c.rol(out.cvt16(), 8);
+
+        c.mov(rsi, qword[REGS + offsetof(JitRegisters, im)]);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8()); // im0-imv
+
+        c.mov(rsi, qword[REGS + offsetof(JitRegisters, ccnta)]);
+        c.shl(rsi, 5);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8());
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), rsi.cvt8()); // ccnta-crep
+
+        c.rol(out.cvt16(), 8);
+    }
+
     template <typename T>
     void SetMod3(Xbyak::CodeGenerator& c, T value) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
-            UNREACHABLE();
+            // TODO: Use pdep, my laptop is Zen 2 :<
+            const auto nibble_to_qword = [&](u32 offset) {
+                c.bt(value, 3 + offset);
+                c.setc(rsi.cvt8());
+                c.shl(rsi, 16);
+                c.bt(value, 2 + offset);
+                c.setc(rsi.cvt8());
+                c.shl(rsi, 16);
+                c.bt(value, 1 + offset);
+                c.setc(rsi.cvt8());
+                c.shl(rsi, 16);
+                c.bt(value, 0 + offset);
+                c.setc(rsi.cvt8());
+            };
+
+            c.xor_(rsi, rsi);
+            nibble_to_qword(0);
+            c.mov(qword[REGS + offsetof(JitRegisters, nimc)], rsi); // nimc-ic2
+            nibble_to_qword(4);
+            c.mov(qword[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 2], rsi); // ou2-ie
+            nibble_to_qword(8);
+            c.mov(qword[REGS + offsetof(JitRegisters, im)], rsi); // im0-imv
+            nibble_to_qword(13);
+            c.mov(qword[REGS + offsetof(JitRegisters, ccnta)], rsi);
         } else {
-            // This is awful but the register is seldom accessed anyway...
             const Mod3 reg{.raw = value};
             c.mov(qword[REGS + offsetof(JitRegisters, nimc)], reg.IcQword());
-            c.mov(dword[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 2], reg.OuDword());
-            c.mov(word[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 4], reg.ou4.Value());
-            c.mov(word[REGS + offsetof(JitRegisters, ie)], reg.ie.Value());
+            c.mov(qword[REGS + offsetof(JitRegisters, ou) + sizeof(u16) * 2], reg.OuIeQword());
             c.mov(qword[REGS + offsetof(JitRegisters, im)], reg.ImQword());
             c.mov(qword[REGS + offsetof(JitRegisters, ccnta)], reg.CQword());
         }

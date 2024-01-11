@@ -352,6 +352,7 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
 MMIORegion::~MMIORegion() = default;
 
 u16 MMIORegion::Read(u16 addr) {
+    printf("MMIO Read\n");
     u16 value = impl->cells[addr].get();
     return value;
 }
