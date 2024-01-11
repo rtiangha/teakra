@@ -983,9 +983,6 @@ public:
 
     void BlockRepeat(u16 lc, u32 address) {
         ASSERT(regs.bcn <= 3);
-        if (address == 0x639a) {
-            printf("yes\n");
-        }
         regs.bkrep_stack[regs.bcn].start = regs.pc;
         regs.bkrep_stack[regs.bcn].end = address;
         regs.bkrep_stack[regs.bcn].lc = lc;

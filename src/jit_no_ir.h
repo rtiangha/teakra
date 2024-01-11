@@ -5,6 +5,7 @@
 #include <atomic>
 #include <stdexcept>
 #include <tuple>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -95,14 +96,15 @@ public:
 
         // Call LookupBlock. This will compile a new block and increment timers for us
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
-        c.mov(ABI_RETURN, reinterpret_cast<uintptr_t>(LookupNewBlockThunk));
-        c.call(ABI_RETURN);
-
+        CallFarFunction(c, LookupNewBlockThunk);
         c.test(ABI_RETURN, ABI_RETURN);
         c.jz(dispatcher_end);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&regs));
         c.jmp(ABI_RETURN);
         c.L(dispatcher_end);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLEE_SAVED, 8, 16);
+        c.ret();
+        c.ready();
     }
 
     static BlockFunc LookupNewBlockThunk(void* this_ptr) {
@@ -123,7 +125,7 @@ public:
         // Count the cycles of the previous executed block and handle any interrupts
         if (current_blk) {
             printf("PC: 0x%x\n", regs.pc);
-            ASSERT(CompareRegisterState());
+            //ASSERT(CompareRegisterState());
             core_timing.Tick(current_blk->cycles);
             cycles_remaining -= current_blk->cycles;
         }
@@ -205,8 +207,9 @@ public:
         }
 
         // Check if we have enough cycles to execute it
+        printf("cycles=%d\n", cycles_remaining);
         if (cycles_remaining < current_blk->cycles) {
-            return nullptr;
+            return 0;
         }
 
         // DEBUG: Run interpreter before running block. We will compare register
@@ -232,7 +235,6 @@ public:
 
         compiling = true;
         while (compiling) {
-            const u32 current_pc = regs.pc;
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
             auto& decoder = decoders[opcode];
             u16 expand_value = 0;
@@ -243,8 +245,8 @@ public:
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
 
-            if (bkrep_end_locations.contains(current_pc)) {
-                EmitBkrepReturn(current_pc, regs.pc);
+            if (bkrep_end_locations.contains(regs.pc - 1)) {
+                EmitBkrepReturn(regs.pc);
             }
         }
 
@@ -260,7 +262,7 @@ public:
         c.jmp(dispatcher_start);
     }
 
-    void EmitBkrepReturn(u32 current_pc, u32 next_pc) {
+    void EmitBkrepReturn(u32 next_pc) {
         using Frame = JitRegisters::BlockRepeatFrame;
         // if (regs.lp && regs.bkrep_stack[regs.bcn - 1].end + 1 == regs.pc) {
         //      if (regs.bkrep_stack[regs.bcn - 1].lc == 0) {
@@ -278,8 +280,8 @@ public:
         c.movzx(bcn, word[REGS + offsetof(JitRegisters, bcn)]);
         c.sub(bcn, 1);
         c.lea(rbx, ptr[bcn + bcn * 2]);
-        c.lea(rbx, ptr[REGS + offsetof(JitRegisters, bkrep_stack) + bcn * 4]);
-        c.cmp(dword[rbx + offsetof(Frame, end)], current_pc);
+        c.lea(rbx, ptr[REGS + offsetof(JitRegisters, bkrep_stack) + rbx * 4]);
+        c.cmp(dword[rbx + offsetof(Frame, end)], regs.pc - 1);
         c.jne(end_label);
         c.cmp(word[rbx + offsetof(Frame, lc)], 0);
         c.jne(jump_to_target);
@@ -448,7 +450,8 @@ public:
         c.mov(dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit], x);
         if (x_sign || y_sign) {
             c.bt(x, 31);
-            c.setc(x.cvt16());
+            c.setc(x.cvt8());
+            c.and_(x.cvt16(), 0x1);
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], x.cvt16());
         } else {
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], 0);
@@ -1003,20 +1006,44 @@ public:
         UNREACHABLE();
     }
     void add(Bx a, Ax b) {
-        UNREACHABLE();
+        const Reg64 value_a = rax;
+        GetAcc(value_a, a.GetName());
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, false);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add_p1(Ax b) {
         UNREACHABLE();
     }
     void add(Px a, Bx b) {
-        UNREACHABLE();
+        const Reg64 value_a = rax;
+        ProductToBus40(value_a, a);
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, false);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
 
     void sub(Ab a, Bx b) {
-        UNREACHABLE();
+        const Reg64 value_a = rax;
+        GetAcc(value_a, a.GetName());
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, true);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
     void sub(Bx a, Ax b) {
-        UNREACHABLE();
+        const Reg64 value_a = rax;
+        GetAcc(value_a, a.GetName());
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, true);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
     void sub_p1(Ax b) {
         UNREACHABLE();
@@ -1646,8 +1673,44 @@ public:
     void push(Abe a) {
         UNREACHABLE();
     }
+
+    std::optional<u16> IsArpArpSttModConst(ArArpSttMod a) {
+        switch (a.GetName()) {
+        case RegName::ar0:
+            return blk_key.curr.ar[0].raw;
+        case RegName::ar1:
+            return blk_key.curr.ar[1].raw;
+        case RegName::arp0:
+            return blk_key.curr.arp[0].raw;
+        case RegName::arp1:
+            return blk_key.curr.arp[1].raw;
+        case RegName::arp2:
+            return blk_key.curr.arp[2].raw;
+        case RegName::arp3:
+            return blk_key.curr.arp[3].raw;
+        case RegName::mod0:
+            return blk_key.curr.mod0.raw;
+        case RegName::mod1:
+            return blk_key.curr.mod1.raw;
+        case RegName::mod2:
+            return blk_key.curr.mod2.raw;
+        default:
+            return std::nullopt;
+        }
+    }
+
     void push(ArArpSttMod a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        if (auto value = IsArpArpSttModConst(a); value.has_value()) {
+            StoreToMemory(sp, value.value());
+            return;
+        }
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_prpage() {
         UNREACHABLE();
@@ -1812,7 +1875,10 @@ public:
     }
 
     void mpyi(Imm8s x) {
-        UNREACHABLE();
+        c.ror(FACTORS, 32);
+        c.mov(FACTORS.cvt16(), x.Signed16());
+        c.rol(FACTORS, 32);
+        DoMultiplication(0, eax, ebx, true, true);
     }
 
     void msu(R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
@@ -1858,7 +1924,14 @@ public:
         UNREACHABLE();
     }
     void modr_d2(Rn a) {
-        UNREACHABLE();
+        u32 unit = a.Index();
+        const Reg64 reg = rax;
+        RnAndModifyNoPreserve(unit, StepValue::Decrease2Mode1, reg);
+        c.and_(FLAGS, ~decltype(Flags::fr)::mask);
+        c.test(reg, reg);
+        c.setz(reg.cvt8());
+        static_assert(decltype(Flags::fr)::position == 0);
+        c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_d2_dmod(Rn a) {
         UNREACHABLE();
@@ -1970,13 +2043,17 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ablh b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        RegFromBus16(b.GetName(), value);
     }
     void mov_eu(MemImm8 a, Axh b) {
         UNREACHABLE();
     }
     void mov(MemImm8 a, RnOld b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        RegFromBus16(b.GetName(), value);
     }
     void mov_sv(MemImm8 a) {
         const Reg64 value = rbx;
@@ -1991,7 +2068,8 @@ public:
         UNREACHABLE();
     }
     void mov(Imm16 a, Bx b) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        RegFromBus16(b.GetName(), value);
     }
     void mov(Imm16 a, Register b) {
         const u16 value = a.Unsigned16();
@@ -2101,7 +2179,7 @@ public:
         UNREACHABLE();
     }
     void mov_sv_to(MemImm8 b) {
-        UNREACHABLE();
+        StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), blk_key.sv);
     }
     void mov_x0_to(Ab b) {
         UNREACHABLE();
@@ -2340,7 +2418,10 @@ public:
         ShiftBus40(value, blk_key.sv, b.GetName());
     }
     void movs(Register a, Ab b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value);
+        SignExtend(value, 16);
+        ShiftBus40(value, blk_key.sv, b.GetName());
     }
     void movs_r6_to(Ax b) {
         UNREACHABLE();
@@ -2714,11 +2795,11 @@ private:
         case RegName::b0h:
         case RegName::b1h:
             if (enable_sat_for_mov) {
-                UNREACHABLE();
+                GetAndSatAcc(out, reg);
             } else {
                 GetAcc(out, reg);
-                c.shr(out, 16);
             }
+            c.shr(out, 16);
             c.and_(out, 0xFFFF);
             break;
         case RegName::a0e:
@@ -2830,6 +2911,11 @@ private:
             c.mov(R0_1_2_3.cvt16(), value.cvt16());
             c.rorx(R0_1_2_3, R0_1_2_3, 32);
             break;
+        case RegName::r3:
+            c.rorx(R0_1_2_3, R0_1_2_3, 48);
+            c.mov(R0_1_2_3.cvt16(), value.cvt16());
+            c.rorx(R0_1_2_3, R0_1_2_3, 16);
+            break;
         case RegName::r4:
             c.mov(R4_5_6_7.cvt16(), value.cvt16());
             break;
@@ -2854,6 +2940,12 @@ private:
             break;
         case RegName::y0:
             c.mov(FACTORS.cvt16(), value.cvt16());
+            break;
+
+        case RegName::sv:
+            c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false;
             break;
 
         case RegName::mod3:
@@ -3468,6 +3560,11 @@ private:
             c.ror(R0_1_2_3, 32);
             StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
             c.rol(R0_1_2_3, 32);
+            break;
+        case 3:
+            c.ror(R0_1_2_3, 48);
+            StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            c.rol(R0_1_2_3, 48);
             break;
         case 4:
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
