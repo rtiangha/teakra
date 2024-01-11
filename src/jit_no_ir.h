@@ -121,6 +121,7 @@ public:
 
         // Count the cycles of the previous executed block and handle any interrupts
         if (current_blk) {
+            printf("PC: 0x%x\n", regs.pc);
             ASSERT(CompareRegisterState());
             core_timing.Tick(current_blk->cycles);
             cycles_remaining -= current_blk->cycles;
@@ -192,6 +193,8 @@ public:
 
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
+        current_blk = &it->second;
+
         if (new_block) {
             // Note: They key may change during compilation, so this needs to be first.
             it->second.entry_key = blk_key;
@@ -199,7 +202,6 @@ public:
         }
 
         // Check if we have enough cycles to execute it
-        current_blk = &it->second;
         if (cycles_remaining < current_blk->cycles) {
             return nullptr;
         }
@@ -238,7 +240,6 @@ public:
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
 
-            // Emit bkrep return.
             if (bkrep_end_locations.contains(current_pc)) {
                 EmitBkrepReturn(current_pc, regs.pc);
             }
@@ -629,7 +630,10 @@ public:
     }
 
     void alu(Alu op, MemImm16 a, Ax b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        LoadFromMemory(value, a.Unsigned16());
+        ExtendOperandForAlm(op.GetName(), value);
+        AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
         UNREACHABLE();
@@ -880,7 +884,15 @@ public:
         UNREACHABLE();
     }
     void alb(Alb op, Imm16 a, Rn b, StepZIDS bs) {
-        UNREACHABLE();
+        const Reg64 address = rax;
+        RnAddressAndModify(b.Index(), bs.GetName(), address);
+        const Reg64 bv = rbx;
+        LoadFromMemory(bv, address);
+        const Reg64 result = rcx;
+        GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
+        if (IsAlbModifying(op)) {
+            StoreToMemory(address, result);
+        }
     }
     void alb(Alb op, Imm16 a, Register b) {
         const Reg64 bv = rax;
@@ -1368,7 +1380,11 @@ public:
     }
 
     void bkrep(Imm8 a, Address16 addr) {
-        UNREACHABLE();
+        // TODO: Can probably inline a loop for this with some checks
+        const Reg64 lc = rax;
+        c.mov(lc, a.Unsigned16());
+        u32 address = addr.Address32() | (regs.pc & 0x30000);
+        BlockRepeat(lc, address);
     }
     void bkrep(Register a, Address18_16 addr_low, Address18_2 addr_high) {
         const Reg64 lc = rax;
@@ -1678,7 +1694,18 @@ public:
     }
 
     void rep(Imm8 a) {
-        UNREACHABLE();
+        u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        auto& decoder = decoders[opcode];
+        u16 expand_value = 0;
+        if (decoder.NeedExpansion()) {
+            expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        }
+
+        for (int i = 0; i <= a.Unsigned16(); i++) {
+            decoder.call(*this, opcode, expand_value);
+            current_blk->cycles++;
+            ASSERT(compiling); // Ensure the instruction doesn't break the block
+        }
     }
     void rep(Register a) {
         UNREACHABLE();
@@ -1867,17 +1894,26 @@ public:
         StoreToMemory(b, value16);
     }
     void mov(Axl a, MemImm16 b) {
-         UNREACHABLE();
+        const Reg64 value16 = rax;
+        RegToBus16(a.GetName(), value16, true);
+        StoreToMemory(b.Unsigned16(), value16);
     }
     void mov(Axl a, MemR7Imm16 b) {
         UNREACHABLE();
     }
     void mov(Axl a, MemR7Imm7s b) {
-        UNREACHABLE();
+        const Reg64 value16 = rax;
+        RegToBus16(a.GetName(), value16, true);
+        const Reg64 address = rbx;
+        RegToBus16(RegName::r7, address);
+        c.add(address, b.Signed16());
+        StoreToMemory(address, value16);
     }
 
     void mov(MemImm16 a, Ax b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        LoadFromMemory(value, a.Unsigned16());
+        RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ab b) {
         UNREACHABLE();
@@ -1917,10 +1953,12 @@ public:
         UNREACHABLE();
     }
     void mov_sv(Imm8s a) {
-        UNREACHABLE();
+        const u16 value = a.Signed16();
+        c.mov(word[REGS + offsetof(JitRegisters, sv)], value);
     }
     void mov(Imm8 a, Axl b) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm16 a, Ax b) {
         UNREACHABLE();
@@ -1932,7 +1970,11 @@ public:
         UNREACHABLE();
     }
     void mov(Rn a, StepZIDS as, Register b) {
-        UNREACHABLE();
+        const Reg64 address = rax;
+        RnAddressAndModify(a.Index(), as.GetName(), address);
+        const Reg64 value = rbx;
+        LoadFromMemory(value, address);
+        RegFromBus16(b.GetName(), value);
     }
     void mov_memsp_to(Register b) {
         UNREACHABLE();
@@ -1958,7 +2000,18 @@ public:
         StoreToMemory(address, value);
     }
     void mov(Register a, Bx b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        if (a.GetName() == RegName::p) {
+            ProductToBus40(value, Px{0});
+            SatAndSetAccAndFlag(b.GetName(), value);
+        } else if (a.GetName() == RegName::a0 || a.GetName() == RegName::a1) {
+            // Is there any difference from the mov(Ab, Ab) instruction?
+            GetAcc(value, a.GetName());
+            SatAndSetAccAndFlag(b.GetName(), value);
+        } else {
+            RegToBus16(a.GetName(), value, true);
+            RegFromBus16(b.GetName(), value);
+        }
     }
     void mov(Register a, Register b) {
         // a = a0 or a1 is overrided
@@ -2135,7 +2188,19 @@ public:
         UNREACHABLE();
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        GetAndSatAcc(value, a.GetName());
+        u16 unit = GetArRnUnit(b);
+        const Reg64 address = rbx;
+        const Reg64 address2 = rcx;
+        RnAddressAndModify(unit, GetArStep(bs), address);
+        c.mov(address2, address);
+        OffsetAddress(unit, address2.cvt16(), GetArOffset(bs));
+        // NOTE: keep the write order exactly like this. The second one overrides the first one if
+        // the offset is zero.
+        StoreToMemory(address2, value);
+        c.shr(value, 16);
+        StoreToMemory(address, value);
     }
     void mova(ArRn2 a, ArStep2 as, Ab b) {
         UNREACHABLE();
@@ -2589,17 +2654,25 @@ private:
             c.movzx(out, R0_1_2_3.cvt16());
             break;
         case RegName::r1:
+            c.rorx(out, R0_1_2_3, 16);
+            break;
         case RegName::r2:
+            c.rorx(out, R0_1_2_3, 32);
+            break;
         case RegName::r3:
-            UNREACHABLE();
+            c.rorx(out, R0_1_2_3, 48);
             break;
         case RegName::r4:
             c.movzx(out, R4_5_6_7.cvt16());
             break;
         case RegName::r5:
+            c.rorx(out, R4_5_6_7, 16);
+            break;
         case RegName::r6:
+            c.rorx(out, R4_5_6_7, 32);
+            break;
         case RegName::r7:
-            UNREACHABLE();
+            c.rorx(out, R4_5_6_7, 48);
             break;
         case RegName::y0:
             c.movzx(out, FACTORS.cvt16());
@@ -2608,8 +2681,8 @@ private:
         case RegName::sp:
             c.movzx(out, word[REGS + offsetof(JitRegisters, sp)]);
             break;
-        case RegName::mod0:
-            UNREACHABLE();
+        case RegName::sv:
+            c.movzx(out, word[REGS + offsetof(JitRegisters, sv)]);
             break;
         default:
             UNREACHABLE();
@@ -2659,6 +2732,16 @@ private:
 
         case RegName::r0:
             c.mov(R0_1_2_3.cvt16(), value.cvt16());
+            break;
+
+        case RegName::r4:
+            c.mov(R4_5_6_7.cvt16(), value.cvt16());
+            break;
+
+        case RegName::r7:
+            c.rorx(R4_5_6_7, R4_5_6_7, 48);
+            c.mov(R4_5_6_7.cvt16(), value.cvt16());
+            c.rorx(R4_5_6_7, R4_5_6_7, 16);
             break;
 
         case RegName::st1:
@@ -2965,6 +3048,51 @@ private:
         }
     }
 
+    enum class OffsetValue : u16 {
+        Zero = 0,
+        PlusOne = 1,
+        MinusOne = 2,
+        MinusOneDmod = 3,
+    };
+
+    void OffsetAddress(u32 unit, Reg16 address, OffsetValue offset, bool dmod = false) {
+        if (offset == OffsetValue::Zero)
+            return;
+        if (offset == OffsetValue::MinusOneDmod) {
+            c.sub(address, 1);
+            return;
+        }
+        const bool emod = blk_key.curr.mod2.IsM(unit) && !blk_key.curr.mod2.IsBr(unit) && !dmod;
+        u16 mod = unit < 4 ? blk_key.curr.cfgi.mod : blk_key.curr.cfgj.mod;
+        [[maybe_unused]]u16 mask = 1; // mod = 0 still have one bit mask
+        for (u32 i = 0; i < 9; ++i) {
+            mask |= mod >> i;
+        }
+        if (offset == OffsetValue::PlusOne) {
+            if (!emod) {
+                c.add(address, 1);
+                return;
+            }
+            UNREACHABLE();
+            //if ((address & mask) == mod)
+            //    return address & ~mask;
+            //return address + 1;
+        } else { // OffsetValue::MinusOne
+            if (!emod) {
+                c.sub(address, 1);
+                return;
+            }
+            throw UnimplementedException();
+            // TODO: sometimes this would return two addresses,
+            // neither of which is the original Rn value.
+            // This only happens for memory writing, but not for memory reading.
+            // Might be some undefined behaviour.
+            //if ((address & mask) == 0)
+            //    return address | mod;
+            //return address - 1;
+        }
+    }
+
     void StepAddress(u32 unit, Reg16 address, StepValue step, bool dmod = false) {
         u16 s;
         bool legacy = blk_key.curr.mod1.cmd;
@@ -3153,6 +3281,87 @@ private:
     void RnAddressAndModify(u32 unit, StepValue step, Reg64 out, bool dmod = false) {
         RnAndModify(unit, step, out, dmod);
         RnAddress(unit, out);
+    }
+
+    template <typename ArRnX>
+    u16 GetArRnUnit(ArRnX arrn) const {
+        static_assert(std::is_same_v<ArRnX, ArRn1> || std::is_same_v<ArRnX, ArRn2>);
+        switch (arrn.Index()) {
+        case 0:
+            return blk_key.curr.ar[0].arrn0.Value();
+        case 1:
+            return blk_key.curr.ar[0].arrn1.Value();
+        case 2:
+            return blk_key.curr.ar[1].arrn0.Value();
+        case 3:
+            return blk_key.curr.ar[1].arrn1.Value();
+        default:
+            UNREACHABLE();
+        }
+    }
+
+    static StepValue ConvertArStep(u16 arvalue) {
+        switch (arvalue) {
+        case 0:
+            return StepValue::Zero;
+        case 1:
+            return StepValue::Increase;
+        case 2:
+            return StepValue::Decrease;
+        case 3:
+            return StepValue::PlusStep;
+        case 4:
+            return StepValue::Increase2Mode1;
+        case 5:
+            return StepValue::Decrease2Mode1;
+        case 6:
+            return StepValue::Increase2Mode2;
+        case 7:
+            return StepValue::Decrease2Mode2;
+        default:
+            UNREACHABLE();
+        }
+    }
+
+    template <typename ArStepX>
+    StepValue GetArStep(ArStepX arstep) const {
+        static_assert(std::is_same_v<ArStepX, ArStep1> || std::is_same_v<ArStepX, ArStep1Alt> ||
+                      std::is_same_v<ArStepX, ArStep2>);
+        const u16 value = [&] {
+            switch (arstep.Index()) {
+            case 0:
+                return blk_key.curr.ar[0].arstep0.Value();
+            case 1:
+                return blk_key.curr.ar[0].arstep1.Value();
+            case 2:
+                return blk_key.curr.ar[1].arstep0.Value();
+            case 3:
+                return blk_key.curr.ar[1].arstep1.Value();
+            default:
+                UNREACHABLE();
+            }
+        }();
+        return ConvertArStep(value);
+    }
+
+    template <typename ArStepX>
+    OffsetValue GetArOffset(ArStepX arstep) const {
+        static_assert(std::is_same_v<ArStepX, ArStep1> || std::is_same_v<ArStepX, ArStep2>);
+        const u16 value = [&] {
+            switch (arstep.Index()) {
+            case 0:
+                return blk_key.curr.ar[0].aroffset0.Value();
+            case 1:
+                return blk_key.curr.ar[0].aroffset1.Value();
+            case 2:
+                return blk_key.curr.ar[1].aroffset0.Value();
+            case 3:
+                return blk_key.curr.ar[1].aroffset1.Value();
+            default:
+                UNREACHABLE();
+            }
+        }();
+        return static_cast<OffsetValue>(value);
     }
 
     bool CompareRegisterState() {
