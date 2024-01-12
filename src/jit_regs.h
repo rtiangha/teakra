@@ -263,7 +263,7 @@ union St2 {
     BitField<15, 1, u16> ip1;
     BitField<0, 6, u16> m1_5;
 
-    u16 IpMask() const {
+    u64 IpMask() const {
         return ip0.Value() | (static_cast<u64>(ip1.Value()) << 16) | (static_cast<u64>(ip2.Value()) << 32);
     }
 };
@@ -312,11 +312,12 @@ struct JitRegisters {
     std::array<BlockRepeatFrame, 4> bkrep_stack;
 
     void GetLc(Xbyak::CodeGenerator& c, Reg64 out) {
-        c.mov(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
         c.movzx(rsi, word[REGS + offsetof(JitRegisters, bcn)]);
         c.sub(rsi, 1);
+        c.lea(rsi, ptr[rsi + rsi * 2]);
+        c.mov(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
         c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
-        c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + rsi * sizeof(BlockRepeatFrame) + offsetof(BlockRepeatFrame, lc)]);
+        c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) + rsi * 4]);
     }
 
     /** Computation unit **/
@@ -394,7 +395,6 @@ struct JitRegisters {
 
     // interrupt pending bit
     std::array<u16, 3> ip{};
-    u16 pad5;
     u16 ipv = 0;
 
     // interrupt context switching bit
@@ -491,6 +491,43 @@ struct JitRegisters {
         }
     }
 
+    void GetStt1(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
+        c.mov(out, FLAGS.cvt16());
+        c.mov(esi, dword[REGS + offsetof(JitRegisters, iu)]);
+        c.and_(out, 1);
+        c.ror(out, 6);
+        c.or_(out.cvt8(), esi.cvt8());
+        c.shr(esi, 15);
+        c.or_(out.cvt8(), esi.cvt8());
+        c.ror(out, 4);
+        c.mov(esi, dword[REGS + offsetof(JitRegisters, pe)]);
+        c.or_(out.cvt8(), esi.cvt8());
+        c.shr(esi, 15);
+        c.or_(out.cvt8(), esi.cvt8());
+        c.ror(out, 2);
+    }
+
+    void GetStt2(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
+        c.xor_(out, out);
+        c.mov(si, word[REGS + offsetof(JitRegisters, bcn)]);
+        c.mov(out, word[REGS + offsetof(JitRegisters, lp)]); // Load lp
+        c.shl(out, 3);
+        c.or_(out, si); // Load bcn
+        c.shl(out, 6);
+        c.mov(si, word[REGS + offsetof(JitRegisters, pcmhi)]);
+        c.or_(out, si); // Load bcn
+        c.shl(out, 6);
+
+        c.mov(rsi, qword[REGS + offsetof(JitRegisters, ip)]);
+        c.or_(out, si); // Load ip and ipv
+        c.shr(rsi, 15);
+        c.or_(out, si);
+        c.shr(rsi, 15);
+        c.or_(out, si);
+        c.shr(rsi, 15);
+        c.or_(out, si);
+    }
+
     template <typename T>
     void SetMod0(Xbyak::CodeGenerator& c, T value) {
         // mod0_unk_const is read only, always set it to 1
@@ -512,6 +549,28 @@ struct JitRegisters {
     template <typename T>
     void SetMod2(Xbyak::CodeGenerator& c, T value) {
         c.mov(word[REGS + offsetof(JitRegisters, mod2)], value);
+    }
+
+    void GetSt0(Xbyak::CodeGenerator& c, Xbyak::Reg16 out, Mod0& mod0_const) {
+        c.mov(out, mod0_const.sat.Value() << 15);
+        c.mov(out.cvt8(), byte[REGS + offsetof(JitRegisters, ie)]);
+        c.ror(out, 1);
+        c.mov(esi, dword[REGS + offsetof(JitRegisters, im)]);
+        c.or_(out.cvt8(), sil);
+        c.shr(rsi, 15);
+        c.or_(out.cvt8(), sil);
+        c.ror(out, 2);
+        c.mov(sil, FLAGS.cvt8());
+        c.shr(sil, 2);
+        c.shl(sil, 1);
+        c.or_(out.cvt8(), FLAGS.cvt8());
+        c.and_(out.cvt8(), 0b11);
+        c.or_(out.cvt8(), sil);
+        c.ror(out, 8);
+        c.rorx(rsi, A[0], 32);
+        c.and_(rsi, 0xFF);
+        c.or_(out, sil);
+        c.ror(out, 4);
     }
 
     template <typename T>
@@ -613,11 +672,9 @@ struct JitRegisters {
             mod0_const.s.Assign(reg.s.Value());
             mod2_const.m1_5.Assign(reg.m1_5.Value());
 
-            // Update im, ou, iu and ip
+            // Update im, ou. iu and ip are read only
             c.mov(word[REGS + offsetof(JitRegisters, im) + sizeof(u16) * 2], reg.im2.Value());
             c.mov(dword[REGS + offsetof(JitRegisters, ou)], reg.ou0.Value() | (static_cast<u32>(reg.ou1.Value()) << 16));
-            c.mov(dword[REGS + offsetof(JitRegisters, iu)], reg.iu0.Value() | (static_cast<u32>(reg.iu1.Value()) << 16));
-            c.mov(qword[REGS + offsetof(JitRegisters, ip)], reg.IpMask());
         }
     }
 

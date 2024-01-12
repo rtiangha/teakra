@@ -1,4 +1,5 @@
 #pragma once
+#pragma clang optimize off
 #include <utility>
 #include <atomic>
 #include <stdexcept>
@@ -142,6 +143,8 @@ public:
                     if (vinterrupt_context_switch) {
                         ContextStore();
                     }
+                    core_timing.Tick();
+                    return; // Do not execute further, so the jit can catch up
                 }
             }
 
@@ -1023,6 +1026,8 @@ public:
         }
         regs.bkrep_stack[0].end = mem.DataRead(address_reg++) | (((flag >> 8) & 3) << 16);
         regs.bkrep_stack[0].start = mem.DataRead(address_reg++) | ((flag & 3) << 16);
+        printf("INTERP: Start = 0x%x\n", regs.bkrep_stack[0].start);
+        printf("INTERP: End = 0x%x\n", regs.bkrep_stack[0].end);
         regs.bkrep_stack[0].lc = mem.DataRead(address_reg++);
     }
     void StoreBlockRepeat(u16& address_reg) {
@@ -2946,7 +2951,7 @@ public:
         regs.ext[3] = a.Signed16();
     }
 
-private:
+public:
     CoreTiming& core_timing;
     RegisterState& regs;
     MemoryInterface& mem;

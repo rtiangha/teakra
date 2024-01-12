@@ -35,7 +35,7 @@ struct alignas(16) StackLayout {
 class EmitX64 {
 public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
-        : core_timing(core_timing), regs(regs), mem(mem), interp(core_timing, iregs, mem), c(MAX_CODE_SIZE) {
+        : core_timing(core_timing), regs(regs), mem(mem), c(MAX_CODE_SIZE) {
         EmitDispatcher();
     }
 
@@ -69,9 +69,9 @@ public:
 
     CoreTiming& core_timing;
     JitRegisters& regs;
-    RegisterState iregs;
+    RegisterState* iregs;
     MemoryInterface& mem;
-    Interpreter interp;
+    Interpreter* debug_interp;
     Xbyak::CodeGenerator c;
     s32 cycles_remaining;
     Xbyak::Label dispatcher_start;
@@ -82,8 +82,10 @@ public:
     Block* current_blk{};
     BlockKey blk_key{};
 
-    void Run(s64 cycles) {
+    void Run(s64 cycles, Interpreter* debug_interp_) {
         cycles_remaining = cycles;
+        debug_interp = debug_interp_;
+        iregs = &debug_interp->regs;
         run_code(this);
     }
 
@@ -120,14 +122,6 @@ public:
                 cycles_remaining--;
                 core_timing.Tick();
             }
-        }
-
-        // Count the cycles of the previous executed block and handle any interrupts
-        if (current_blk) {
-            printf("PC: 0x%x\n", regs.pc);
-            //ASSERT(CompareRegisterState());
-            core_timing.Tick(current_blk->cycles);
-            cycles_remaining -= current_blk->cycles;
         }
 
         // Check for interrupts.
@@ -167,6 +161,14 @@ public:
                     ContextStore();
                 }
             }
+        }
+
+        // Count the cycles of the previous executed block and handle any interrupts
+        if (current_blk) {
+            printf("PC: 0x%x\n", regs.pc);
+            ASSERT(CompareRegisterState());
+            core_timing.Tick(current_blk->cycles);
+            cycles_remaining -= current_blk->cycles;
         }
 
         // Lookup and compile next block
@@ -209,12 +211,12 @@ public:
         // Check if we have enough cycles to execute it
         printf("cycles=%d\n", cycles_remaining);
         if (cycles_remaining < current_blk->cycles) {
-            return 0;
+            return nullptr;
         }
 
         // DEBUG: Run interpreter before running block. We will compare register
         // state when the dispatcher is re-entered to ensure JIT was correct.
-        interp.Run(current_blk->cycles);
+        debug_interp->Run(current_blk->cycles);
 
         // Return block function
         return current_blk->func;
@@ -422,6 +424,17 @@ public:
         CallFarFunction(c, MemDataReadThunk);
         ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
         c.mov(out.cvt16(), ABI_RETURN.cvt16());
+    }
+
+    template <typename T>
+    void LoadFromMemory(Xbyak::Address out, T addr) {
+        // TODO: Non MMIO reads can be performed inside the JIT.
+        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
+        c.mov(ABI_PARAM2, addr);
+        CallFarFunction(c, MemDataReadThunk);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.mov(out, ABI_RETURN.cvt16());
     }
 
     void DoMultiplication(u32 unit, Reg32 x, Reg32 y, bool x_sign, bool y_sign) {
@@ -688,7 +701,10 @@ public:
         SetAccAndFlag(c.GetName(), rax);
     }
     void or_(Ax a, Bx b, Ax c) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        GetAcc(value, a.GetName());
+        this->c.or_(value, GetAccDirect(b.GetName()));
+        SetAccAndFlag(c.GetName(), value);
     }
     void or_(Bx a, Bx b, Ax c) {
         UNREACHABLE();
@@ -1391,7 +1407,7 @@ public:
     }
 
     void moda3(Moda3 op, Bx a, Cond cond) {
-        UNREACHABLE();
+        Moda(op.GetName(), a.GetName(), cond);
     }
 
     void pacr1(Ax a) {
@@ -1441,21 +1457,147 @@ public:
         UNREACHABLE();
     }
 
+    static void DoBkrepStackCopyThunk(JitRegisters* regs) {
+        std::copy(regs->bkrep_stack.begin() + 1, regs->bkrep_stack.begin() + regs->bcn,
+                  regs->bkrep_stack.begin());
+        --regs->bcn;
+        if (regs->bcn == 0)
+            regs->lp = 0;
+    }
+
+    static void DoBkrepStackCopyThunkRestore(JitRegisters* regs) {
+        ASSERT(regs->bcn <= 3);
+        std::copy_backward(regs->bkrep_stack.begin(), regs->bkrep_stack.begin() + regs->bcn,
+                           regs->bkrep_stack.begin() + regs->bcn + 1);
+        ++regs->bcn;
+    }
+
+    void RestoreBlockRepeat(Reg64 address_reg) {
+        using Frame = JitRegisters::BlockRepeatFrame;
+        const Reg64 flag = rcx;
+        LoadFromMemory(flag, address_reg);
+        c.add(address_reg, 1);
+
+        Xbyak::Label end_label, not_in_loop;
+        c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
+        c.jz(not_in_loop);
+        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.mov(ABI_PARAM1, REGS);
+        CallFarFunction(c, DoBkrepStackCopyThunk);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.jmp(end_label);
+        c.L(not_in_loop);
+        c.bt(flag, 15);
+        c.setc(byte[REGS + offsetof(JitRegisters, lp)]);
+        c.setc(byte[REGS + offsetof(JitRegisters, bcn)]);
+        c.L(end_label);
+
+        const Reg64 start_end = rdx;
+        c.rorx(start_end, flag, 8);
+        c.and_(start_end, 0x3);
+        c.shl(start_end, 16);
+        LoadFromMemory(start_end, address_reg);
+        c.add(address_reg, 1);
+        c.shl(start_end, 16);
+        c.and_(flag, 0x3);
+        c.mov(start_end.cvt16(), flag.cvt16());
+        c.shl(start_end, 16);
+        LoadFromMemory(start_end, address_reg);
+        c.add(address_reg, 1);
+        c.mov(qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)], start_end);
+        LoadFromMemory(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)], address_reg);
+        c.add(address_reg, 1);
+    }
+
+    void StoreBlockRepeat(Reg64 address_reg) {
+        using Frame = JitRegisters::BlockRepeatFrame;
+        const Reg64 flag = rcx;
+        c.mov(flag, word[REGS + offsetof(JitRegisters, lp)]);
+        c.shl(flag, 15);
+        const Reg64 start_end = rdx;
+        c.mov(start_end, qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)]);
+        c.sub(address_reg, 1);
+        StoreToMemory(address_reg, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)]);
+        c.sub(address_reg, 1);
+        StoreToMemory(address_reg, start_end);
+        c.shr(start_end, 16);
+        c.or_(flag.cvt8(), start_end.cvt8());
+        c.shr(start_end, 16);
+        c.sub(address_reg, 1);
+        StoreToMemory(address_reg, start_end);
+        c.and_(start_end, 0xFFFF0000);
+        c.shr(start_end, 16);
+        c.shl(start_end, 8);
+        c.or_(flag, start_end);
+        c.sub(address_reg, 1);
+        StoreToMemory(address_reg, flag);
+
+        Xbyak::Label end_label;
+        c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
+        c.jz(end_label);
+        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.mov(ABI_PARAM1, REGS);
+        CallFarFunction(c, DoBkrepStackCopyThunk);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        c.L(end_label);
+    }
+
     void bkreprst(ArRn2 a) {
         UNREACHABLE();
     }
     void bkreprst_memsp() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        RestoreBlockRepeat(sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void bkrepsto(ArRn2 a) {
         UNREACHABLE();
     }
     void bkrepsto_memsp() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        StoreBlockRepeat(sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
 
     void banke(BankFlags flags) {
-        UNREACHABLE();
+        if (flags.Cfgi()) {
+            c.mov(word[REGS + offsetof(JitRegisters, cfgi)], blk_key.shadow.cfgi.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgib)], blk_key.curr.cfgi.raw);
+            std::swap(blk_key.curr.cfgi, blk_key.shadow.cfgi);
+            if (blk_key.curr.mod1.stp16) {
+                c.mov(word[REGS + offsetof(JitRegisters, stepi0)], blk_key.shadow.stepi0);
+                c.mov(word[REGS + offsetof(JitRegisters, stepi0b)], blk_key.curr.stepi0);
+                std::swap(blk_key.curr.stepi0, blk_key.shadow.stepi0);
+            }
+        }
+        if (flags.R4()) {
+            c.xchg(word[REGS + offsetof(JitRegisters, r4b)], R4_5_6_7.cvt16());
+        }
+        if (flags.R1()) {
+            c.rorx(R0_1_2_3, R0_1_2_3, 16);
+            c.xchg(word[REGS + offsetof(JitRegisters, r1b)], R0_1_2_3.cvt16());
+            c.rorx(R0_1_2_3, R0_1_2_3, 48);
+        }
+        if (flags.R0()) {
+            c.xchg(word[REGS + offsetof(JitRegisters, r0b)], R0_1_2_3.cvt16());
+        }
+        if (flags.R7()) {
+            c.rorx(R4_5_6_7, R4_5_6_7, 48);
+            c.xchg(word[REGS + offsetof(JitRegisters, r7b)], R4_5_6_7.cvt16());
+            c.rorx(R4_5_6_7, R4_5_6_7, 16);
+        }
+        if (flags.Cfgj()) {
+            c.mov(word[REGS + offsetof(JitRegisters, cfgj)], blk_key.shadow.cfgj.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgjb)], blk_key.curr.cfgj.raw);
+            std::swap(blk_key.curr.cfgj, blk_key.shadow.cfgj);
+            if (blk_key.curr.mod1.stp16) {
+                c.mov(word[REGS + offsetof(JitRegisters, stepj0)], blk_key.shadow.stepj0);
+                c.mov(word[REGS + offsetof(JitRegisters, stepj0b)], blk_key.curr.stepj0);
+                std::swap(blk_key.curr.stepj0, blk_key.shadow.stepj0);
+            }
+        }
     }
     void bankr() {
          UNREACHABLE();
@@ -1598,7 +1740,9 @@ public:
         UNREACHABLE();
     }
     void rets(Imm8 a) {
-        UNREACHABLE();
+        EmitPopPC();
+        c.add(word[REGS + offsetof(JitRegisters, sp)], a.Unsigned16());
+        compiling = false;
     }
 
     void load_ps(Imm2 a) {
@@ -1659,19 +1803,30 @@ public:
     }
 
     void push(Imm16 a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, a.Unsigned16());
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push(Register a) {
-        const Reg64 value = rax;
+        const Reg64 value = rbx;
         RegToBus16(a.GetName(), value, true);
-        const Reg64 sp = rbx;
+        const Reg64 sp = rcx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push(Abe a) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        GetAndSatAcc(value, a.GetName());
+        c.shr(value, 32);
+        const Reg64 sp = rcx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
 
     std::optional<u16> IsArpArpSttModConst(ArArpSttMod a) {
@@ -1705,6 +1860,7 @@ public:
         c.sub(sp, 1);
         if (auto value = IsArpArpSttModConst(a); value.has_value()) {
             StoreToMemory(sp, value.value());
+            c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
             return;
         }
         const Reg64 value = rax;
@@ -1716,28 +1872,85 @@ public:
         UNREACHABLE();
     }
     void push(Px a) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        ProductToBus40(value, a);
+        const Reg64 sp = rcx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.sub(sp, 1);
+        c.shr(value, 16);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_r6() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(RegName::r6, value);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_repc() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        c.mov(value, word[REGS + offsetof(JitRegisters, repc)]);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_x0() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        c.rorx(value, FACTORS, 32);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_x1() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        c.rorx(value, FACTORS, 48);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_y1() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        c.rorx(value, FACTORS, 16);
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void pusha(Ax a) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        GetAndSatAcc(value, a.GetName());
+        const Reg64 sp = rcx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.sub(sp, 1);
+        c.shr(value, 16);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void pusha(Bx a) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        GetAndSatAcc(value, a.GetName());
+        const Reg64 sp = rcx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.sub(sp, 1);
+        StoreToMemory(sp, value);
+        c.sub(sp, 1);
+        c.shr(value, 16);
+        StoreToMemory(sp, value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
 
     void pop(Register a) {
@@ -1780,7 +1993,17 @@ public:
         UNREACHABLE();
     }
     void popa(Ab a) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        const Reg64 sp = rcx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.shl(value, 16);
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        SignExtend(value, 32);
+        SetAccAndFlag(a.GetName(), value);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
 
     void rep(Imm8 a) {
@@ -2011,12 +2234,12 @@ public:
     }
 
     void mov(Ablh a, MemImm8 b) {
-        const Reg64 value16 = rax;
+        const Reg64 value16 = rbx;
         RegToBus16(a.GetName(), value16, true);
         StoreToMemory(b, value16);
     }
     void mov(Axl a, MemImm16 b) {
-        const Reg64 value16 = rax;
+        const Reg64 value16 = rbx;
         RegToBus16(a.GetName(), value16, true);
         StoreToMemory(b.Unsigned16(), value16);
     }
@@ -2024,9 +2247,9 @@ public:
         UNREACHABLE();
     }
     void mov(Axl a, MemR7Imm7s b) {
-        const Reg64 value16 = rax;
+        const Reg64 value16 = rbx;
         RegToBus16(a.GetName(), value16, true);
-        const Reg64 address = rbx;
+        const Reg64 address = rcx;
         RegToBus16(RegName::r7, address);
         c.add(address, b.Signed16());
         StoreToMemory(address, value16);
@@ -2101,7 +2324,6 @@ public:
         const Reg64 address = rax;
         RegToBus16(RegName::r7, address);
         c.add(address, a.Signed16());
-        EmitPrint(address, "R7 Address = 0x%x\n");
         const Reg64 value = rbx;
         LoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
@@ -2120,10 +2342,12 @@ public:
         UNREACHABLE();
     }
     void mov_mixp_to(Register b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        c.mov(value, word[REGS + offsetof(JitRegisters, mixp)]);
+        RegFromBus16(b.GetName(), value);
     }
     void mov(RnOld a, MemImm8 b) {
-        const Reg64 value = rax;
+        const Reg64 value = rbx;
         RegToBus16(a.GetName(), value);
         StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), value);
     }
@@ -2135,10 +2359,10 @@ public:
     }
     void mov(Register a, Rn b, StepZIDS bs) {
         // a = a0 or a1 is overrided
-        const Reg64 value = rax;
+        const Reg64 value = rbx;
         RegToBus16(a.GetName(), value, true);
-        const Reg64 address = rbx;
-        RnAddressAndModify(b.Index(), bs.GetName(), rbx);
+        const Reg64 address = rcx;
+        RnAddressAndModify(b.Index(), bs.GetName(), address);
         StoreToMemory(address, value);
     }
     void mov(Register a, Bx b) {
@@ -2225,10 +2449,10 @@ public:
         UNREACHABLE();
     }
     void mov_stepi0_a0h() {
-        UNREACHABLE();
+        RegFromBus16(RegName::a0h, blk_key.curr.stepi0);
     }
     void mov_stepj0_a0h() {
-        UNREACHABLE();
+        RegFromBus16(RegName::a0h, blk_key.curr.stepj0);
     }
 
     void mov_prpage(Abl a) {
@@ -2238,7 +2462,9 @@ public:
         UNREACHABLE();
     }
     void mov(Abl a, ArArp b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value, true);
+        RegFromBus16(b.GetName(), value);
     }
     void mov(Abl a, SttMod b) {
         const Reg64 value = rax;
@@ -2253,7 +2479,9 @@ public:
         UNREACHABLE();
     }
     void mov(ArArp a, Abl b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value);
+        RegFromBus16(b.GetName(), value);
     }
     void mov(SttMod a, Abl b) {
         const Reg64 value = rax;
@@ -2334,11 +2562,11 @@ public:
         UNREACHABLE();
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
-        const Reg64 value = rax;
-        GetAndSatAcc(value, a.GetName());
         u16 unit = GetArRnUnit(b);
+        const Reg64 value = rcx;
+        GetAndSatAcc(value, a.GetName());
         const Reg64 address = rbx;
-        const Reg64 address2 = rcx;
+        const Reg64 address2 = rax;
         RnAddressAndModify(unit, GetArStep(bs), address);
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(bs));
@@ -2349,7 +2577,18 @@ public:
         StoreToMemory(address, value);
     }
     void mova(ArRn2 a, ArStep2 as, Ab b) {
-        UNREACHABLE();
+        u16 unit = GetArRnUnit(a);
+        const Reg64 address = rax;
+        RnAddressAndModify(unit, GetArStep(as), address);
+        const Reg64 address2 = rbx;
+        c.mov(address2, address);
+        OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
+        const Reg64 value = rcx;
+        LoadFromMemory(value, address);
+        c.ror(value.cvt32(), 16);
+        LoadFromMemory(value, address2);
+        c.movsxd(value, value.cvt32());
+        SatAndSetAccAndFlag(b.GetName(), value);
     }
 
     void mov_r6_to(Bx b) {
@@ -2359,10 +2598,14 @@ public:
         UNREACHABLE();
     }
     void mov_r6_to(Register b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(RegName::r6, value);
+        RegFromBus16(b.GetName(), value);
     }
     void mov_r6(Register a) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value, true);
+        RegFromBus16(RegName::r6, value);
     }
     void mov_memsp_r6() {
         UNREACHABLE();
@@ -2842,9 +3085,61 @@ private:
         case RegName::sv:
             c.mov(out, blk_key.sv);
             break;
+        case RegName::lc:
+            regs.GetLc(c, out);
+            break;
+        case RegName::stt0:
+            regs.GetStt0(c, out.cvt16());
+            break;
+        case RegName::stt1:
+            regs.GetStt1(c, out.cvt16());
+            break;
+        case RegName::stt2:
+            regs.GetStt2(c, out.cvt16());
+            break;
+        case RegName::st0:
+            regs.GetSt0(c, out.cvt16(), blk_key.curr.mod0);
+            break;
+
+        case RegName::cfgi:
+            c.mov(out, blk_key.curr.cfgi.raw);
+            break;
+        case RegName::cfgj:
+            c.mov(out, blk_key.curr.cfgj.raw);
+            break;
+
+        case RegName::mod0:
+            c.mov(out, blk_key.curr.mod0.raw);
+            break;
+        case RegName::mod1:
+            c.mov(out, blk_key.curr.mod1.raw);
+            break;
+        case RegName::mod2:
+            c.mov(out, blk_key.curr.mod2.raw);
+            break;
         case RegName::mod3:
             regs.GetMod3(c, out);
             break;
+
+        case RegName::ar0:
+            c.mov(out, blk_key.curr.ar[0].raw);
+            break;
+        case RegName::ar1:
+            c.mov(out, blk_key.curr.ar[1].raw);
+            break;
+        case RegName::arp0:
+            c.mov(out, blk_key.curr.arp[0].raw);
+            break;
+        case RegName::arp1:
+            c.mov(out, blk_key.curr.arp[1].raw);
+            break;
+        case RegName::arp2:
+            c.mov(out, blk_key.curr.arp[2].raw);
+            break;
+        case RegName::arp3:
+            c.mov(out, blk_key.curr.arp[3].raw);
+            break;
+
         default:
             UNREACHABLE();
         }
@@ -2881,6 +3176,33 @@ private:
         }
     }
 
+    Reg64 GetAccDirect(RegName name) {
+        switch (name) {
+        case RegName::a0:
+        case RegName::a0h:
+        case RegName::a0l:
+        case RegName::a0e:
+            return A[0];
+        case RegName::a1:
+        case RegName::a1h:
+        case RegName::a1l:
+        case RegName::a1e:
+            return A[1];
+        case RegName::b0:
+        case RegName::b0h:
+        case RegName::b0l:
+        case RegName::b0e:
+            return B[0];
+        case RegName::b1:
+        case RegName::b1h:
+        case RegName::b1l:
+        case RegName::b1e:
+            return B[1];
+        default:
+            UNREACHABLE();
+        }
+    }
+
     void RegFromBus16(RegName reg, Reg64 value) {
         switch (reg) {
         case RegName::a0:
@@ -2895,6 +3217,14 @@ private:
         case RegName::b0l:
         case RegName::b1l:
             c.movzx(value, value.cvt16());
+            SatAndSetAccAndFlag(reg, value);
+            break;
+        case RegName::a0h:
+        case RegName::a1h:
+        case RegName::b0h:
+        case RegName::b1h:
+            c.shr(value, 16);
+            SignExtend(value, 32);
             SatAndSetAccAndFlag(reg, value);
             break;
 
@@ -2924,6 +3254,11 @@ private:
             c.mov(R4_5_6_7.cvt16(), value.cvt16());
             c.rorx(R4_5_6_7, R4_5_6_7, 48);
             break;
+        case RegName::r6:
+            c.rorx(R4_5_6_7, R4_5_6_7, 32);
+            c.mov(R4_5_6_7.cvt16(), value.cvt16());
+            c.rorx(R4_5_6_7, R4_5_6_7, 32);
+            break;
         case RegName::r7:
             c.rorx(R4_5_6_7, R4_5_6_7, 48);
             c.mov(R4_5_6_7.cvt16(), value.cvt16());
@@ -2950,6 +3285,12 @@ private:
 
         case RegName::mod3:
             regs.SetMod3(c, value);
+            break;
+
+        case RegName::ar0:
+            c.mov(word[REGS + offsetof(JitRegisters, ar)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
             break;
 
         default:
@@ -3509,22 +3850,22 @@ private:
             c.movzx(out, R0_1_2_3.cvt16());
             break;
         case 1:
-            c.rorx(out.cvt32(), R0_1_2_3.cvt32(), 16);
+            c.rorx(out, R0_1_2_3, 16);
             c.movzx(out, out.cvt16()); // Needed?
             break;
         case 2:
-            c.rorx(out.cvt32(), R0_1_2_3.cvt32(), 32);
+            c.rorx(out, R0_1_2_3, 32);
             c.movzx(out, out.cvt16()); // Needed?
             break;
         case 3:
-            c.rorx(out.cvt32(), R0_1_2_3.cvt32(), 48);
+            c.rorx(out, R0_1_2_3, 48);
             c.movzx(out, out.cvt16()); // Needed?
             break;
         case 4:
             c.movzx(out, R4_5_6_7.cvt16());
             break;
         case 5:
-            c.rorx(out.cvt32(), R4_5_6_7.cvt32(), 16);
+            c.rorx(out, R4_5_6_7, 16);
             c.movzx(out, out.cvt16()); // Needed?
             break;
         default:
@@ -3668,51 +4009,62 @@ private:
     bool CompareRegisterState() {
         using Frame = JitRegisters::BlockRepeatFrame;
         bool result = true;
-        if (!(regs.pc == iregs.pc && regs.r == iregs.r && regs.cpc == iregs.cpc && regs.prpage == iregs.prpage && regs.repc == iregs.repc && regs.repcs == iregs.repcs)) {
+        auto& raw = mem.GetMemory().raw;
+        if (!(std::memcmp(raw.data(), debug_interp->mem.GetMemory().raw.data(), raw.size()) == 0)) {
+            printf("Memory does not match!\n");
+            for (size_t i = 0; i < raw.size(); i += 2) {
+                if (debug_interp->mem.GetMemory().raw[i] != raw[i]) {
+                    printf("Word 0x%lx mismatch (interp: 0x%x, jit: 0x%x)\n", i >> 1, *(u16*)&debug_interp->mem.GetMemory().raw[i],
+                           *(u16*)&raw[i]);
+                }
+            }
+            result = false;
+        }
+        if (!(regs.pc == iregs->pc && regs.r == iregs->r && regs.cpc == iregs->cpc && regs.prpage == iregs->prpage && regs.repc == iregs->repc && regs.repcs == iregs->repcs)) {
             printf("Failed part 0 of checks\n");
             result = false;
         }
-        if (!(regs.im == iregs.im && regs.ou == iregs.ou && regs.nimc == iregs.nimc)) {
+        if (!(regs.im == iregs->im && regs.ou == iregs->ou && regs.nimc == iregs->nimc)) {
             printf("Failed part 1 of checks\n");
             result = false;
         }
-        if (!(regs.rep == iregs.rep && regs.crep == iregs.crep && regs.a == iregs.a && regs.b == iregs.b)) {
+        if (!(regs.rep == iregs->rep && regs.crep == iregs->crep && regs.a == iregs->a && regs.b == iregs->b)) {
             printf("Failed part 2 of checks\n");
             result = false;
         }
-        if (!(regs.ccnta == iregs.ccnta && regs.mod0.sat == iregs.sat && regs.mod0.sata == iregs.sata && regs.mod0.s == iregs.s && regs.sv == iregs.sv)) {
+        if (!(regs.ccnta == iregs->ccnta && regs.mod0.sat == iregs->sat && regs.mod0.sata == iregs->sata && regs.mod0.s == iregs->s && regs.sv == iregs->sv)) {
             printf("Failed part 3 of checks\n");
             result = false;
         }
-        if (!(regs.flags.fz == iregs.fz && regs.flags.fm == iregs.fm && regs.flags.fn == iregs.fn && regs.flags.fv == iregs.fv && regs.flags.fe == iregs.fe)) {
+        if (!(regs.flags.fz == iregs->fz && regs.flags.fm == iregs->fm && regs.flags.fn == iregs->fn && regs.flags.fv == iregs->fv && regs.flags.fe == iregs->fe)) {
             printf("Failed part 4 of checks\n");
             result = false;
         }
-        if (!(regs.flags.fc0 == iregs.fc0 && regs.flags.fc1 == iregs.fc1 && regs.flags.flm == iregs.flm && regs.flags.fvl == iregs.fvl && regs.flags.fr == iregs.fr)) {
+        if (!(regs.flags.fc0 == iregs->fc0 && regs.flags.fc1 == iregs->fc1 && regs.flags.flm == iregs->flm && regs.flags.fvl == iregs->fvl && regs.flags.fr == iregs->fr)) {
             printf("Failed part 5 of checks\n");
             result = false;
         }
-        if (!(regs.vtr0 == iregs.vtr0 && regs.vtr1 == iregs.vtr1 && regs.x == iregs.x && regs.y == iregs.y && regs.mod0.hwm == iregs.hwm && regs.p == iregs.p)) {
+        if (!(regs.vtr0 == iregs->vtr0 && regs.vtr1 == iregs->vtr1 && regs.x == iregs->x && regs.y == iregs->y && regs.mod0.hwm == iregs->hwm && regs.p == iregs->p)) {
             printf("Failed part 6 of checks\n");
             result = false;
         }
-        if (!(regs.pe == iregs.pe && regs.mod0.ps0 == iregs.ps[0] && regs.mod0.ps1 == iregs.ps[1] && regs.p0h_cbs == iregs.p0h_cbs && regs.mixp == iregs.mixp)) {
+        if (!(regs.pe == iregs->pe && regs.mod0.ps0 == iregs->ps[0] && regs.mod0.ps1 == iregs->ps[1] && regs.p0h_cbs == iregs->p0h_cbs && regs.mixp == iregs->mixp)) {
             printf("Failed part 7 of checks\n");
             result = false;
         }
-        if (!(regs.sp == iregs.sp && regs.mod1.page == iregs.page && regs.pcmhi == iregs.pcmhi && regs.cfgi.step == iregs.stepi && regs.cfgj.step == iregs.stepj)) {
+        if (!(regs.sp == iregs->sp && regs.mod1.page == iregs->page && regs.pcmhi == iregs->pcmhi && regs.cfgi.step == iregs->stepi && regs.cfgj.step == iregs->stepj)) {
             printf("Failed part 8 of checks\n");
             result = false;
         }
-        if (!(regs.cfgi.mod == iregs.modi && regs.cfgj.mod == iregs.modj && regs.stepi0 == iregs.stepi0 && regs.stepj0 == iregs.stepj0 && regs.mod1.stp16 == iregs.stp16)) {
+        if (!(regs.cfgi.mod == iregs->modi && regs.cfgj.mod == iregs->modj && regs.stepi0 == iregs->stepi0 && regs.stepj0 == iregs->stepj0 && regs.mod1.stp16 == iregs->stp16)) {
             printf("Failed part 9 of checks\n");
             result = false;
         }
-        if (!(regs.mod1.cmd == iregs.cmd && regs.mod1.epi == iregs.epi && regs.mod1.epj == iregs.epj)) {
+        if (!(regs.mod1.cmd == iregs->cmd && regs.mod1.epi == iregs->epi && regs.mod1.epj == iregs->epj)) {
             printf("Failed part 10 of checks\n");
             result = false;
         }
-        if (!(regs.lp == iregs.lp && regs.bcn == iregs.bcn && std::memcmp(&regs.bkrep_stack, &iregs.bkrep_stack, sizeof(Frame)) == 0)) {
+        if (!(regs.lp == iregs->lp && regs.bcn == iregs->bcn && std::memcmp(&regs.bkrep_stack, &iregs->bkrep_stack, sizeof(Frame)) == 0)) {
             printf("Failed part 11 of checks\n");
             result = false;
         }
