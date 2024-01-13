@@ -25,7 +25,7 @@
 
 namespace Teakra {
 
-constexpr size_t MAX_CODE_SIZE = 4 * 1024 * 1024;
+constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
 
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
@@ -73,6 +73,7 @@ public:
     MemoryInterface& mem;
     Interpreter* debug_interp;
     Xbyak::CodeGenerator c;
+    std::array<u8, 0x1000> pad;
     s32 cycles_remaining;
     Xbyak::Label dispatcher_start;
     const std::vector<Matcher<EmitX64>> decoders = GetDecoderTable<EmitX64>();
@@ -81,11 +82,13 @@ public:
     std::unordered_map<size_t, Block> code_blocks;
     Block* current_blk{};
     BlockKey blk_key{};
+    bool unimplemented = false;
 
     void Run(s64 cycles, Interpreter* debug_interp_) {
         cycles_remaining = cycles;
         debug_interp = debug_interp_;
         iregs = &debug_interp->regs;
+        current_blk = nullptr;
         run_code(this);
     }
 
@@ -118,7 +121,7 @@ public:
             u64 skipped = core_timing.Skip(cycles_remaining - 1);
             cycles_remaining -= skipped;
             // Skip additional tick so to let components fire interrupts
-            if (cycles_remaining > 0) {
+            if (cycles_remaining > 1) {
                 cycles_remaining--;
                 core_timing.Tick();
             }
@@ -165,8 +168,9 @@ public:
 
         // Count the cycles of the previous executed block and handle any interrupts
         if (current_blk) {
-            printf("PC: 0x%x\n", regs.pc);
-            ASSERT(CompareRegisterState());
+            //printf("JIT PC: 0x%x\n", regs.pc);
+            //printf("Interp PC: 0x%x\n", iregs->pc);
+            //CompareRegisterState();
             core_timing.Tick(current_blk->cycles);
             cycles_remaining -= current_blk->cycles;
         }
@@ -209,14 +213,15 @@ public:
         }
 
         // Check if we have enough cycles to execute it
-        printf("cycles=%d\n", cycles_remaining);
+        //printf("cycles=%d\n", cycles_remaining);
         if (cycles_remaining < current_blk->cycles) {
+            printf("Done slice\n");
             return nullptr;
         }
 
         // DEBUG: Run interpreter before running block. We will compare register
         // state when the dispatcher is re-entered to ensure JIT was correct.
-        debug_interp->Run(current_blk->cycles);
+        //debug_interp->Run(current_blk->cycles, cycles_remaining);
 
         // Return block function
         return current_blk->func;
@@ -246,6 +251,15 @@ public:
 
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
+
+            if (blk.cycles >= cycles_remaining) {
+                compiling = false;
+            }
+
+            if (blk.cycles == 32 && compiling) {
+                c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+                compiling = false;
+            }
 
             if (bkrep_end_locations.contains(regs.pc - 1)) {
                 EmitBkrepReturn(regs.pc);
@@ -307,7 +321,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         if (regs.cpc == 1) {
-            UNREACHABLE();
+            unimplemented = true;
         } else {
             StoreToMemory(sp, l);
             c.sub(sp, 1);
@@ -334,7 +348,7 @@ public:
         const Reg64 pc = rcx;
         c.xor_(pc, pc);
         if (regs.cpc == 1) {
-            UNREACHABLE();
+            unimplemented = true;
         } else {
             LoadFromMemory(pc, sp);
             c.add(sp, 1);
@@ -386,25 +400,25 @@ public:
 
     void undefined(u16 opcode) {
         std::printf("Undefined opcode: 0x%x\n", opcode);
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void ContextStore() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void ContextRestore() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void norm(Ax a, Rn b, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void swap(SwapType swap) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void trap() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     static u16 MemDataReadThunk(void* mem_ptr, u16 address) {
@@ -500,9 +514,10 @@ public:
             c.and_(value, 0xFFFF);
             c.and_(FLAGS, ~decltype(Flags::fz)::mask); // clear fz
             c.test(value, a);
-            c.setz(a);
-            c.shl(a, decltype(Flags::fz)::position);
-            c.or_(FLAGS, a); // regs.fz = (value & a) == 0;
+            c.setz(a.cvt8());
+            c.shl(a, 15);
+            c.shr(a, 15 - decltype(Flags::fz)::position);
+            c.or_(FLAGS.cvt16(), a.cvt16()); // regs.fz = (value & a) == 0;
             break;
         }
         case AlmOp::Tst1: {
@@ -511,8 +526,9 @@ public:
             c.and_(FLAGS, ~decltype(Flags::fz)::mask); // clear fz
             c.not_(a);
             c.test(value, a);
-            c.setz(a);
-            c.shl(a, decltype(Flags::fz)::position);
+            c.setz(a.cvt8());
+            c.shl(a, 15);
+            c.shr(a, 15 - decltype(Flags::fz)::position);
             c.or_(FLAGS, a); // regs.fz = (value & ~a) == 0;
             break;
         }
@@ -536,7 +552,7 @@ public:
             break;
         }
         case AlmOp::Msu: {
-            UNREACHABLE();
+            unimplemented = true;
             GetAcc(value, b.GetName());
             const Reg64 product = rcx;
             ProductToBus40(product, Px{0});
@@ -554,9 +570,9 @@ public:
         }
         case AlmOp::Sqra: {
             GetAcc(value, b.GetName());
-            const Reg64 product = rcx;
+            const Reg64 product = rdx;
             ProductToBus40(product, Px{0});
-            const Reg64 result = rdx;
+            const Reg64 result = rcx;
             AddSub(value, product, result, false);
             SatAndSetAccAndFlag(b.GetName(), result);
         }
@@ -573,7 +589,7 @@ public:
         }
 
         default:
-            UNREACHABLE();
+            unimplemented = true;
         }
     }
 
@@ -625,12 +641,12 @@ public:
     }
     void alm(Alm op, Register a, Ax b) {
         const Reg64 value = rbx;
-        auto CheckBus40OperandAllowed = [op] {
+        auto CheckBus40OperandAllowed = [&] {
             static const std::unordered_set<AlmOp> allowed_instruction{
                 AlmOp::Or, AlmOp::And, AlmOp::Xor, AlmOp::Add, AlmOp::Cmp, AlmOp::Sub,
             };
             if (allowed_instruction.count(op.GetName()) == 0)
-                throw UnimplementedException(); // weird effect. probably undefined
+                unimplemented = true; // weird effect. probably undefined
         };
         switch (a.GetName()) {
         // need more test
@@ -651,7 +667,7 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alm_r6(Alm op, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void alu(Alu op, MemImm16 a, Ax b) {
@@ -661,7 +677,7 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void alu(Alu op, Imm16 a, Ax b) {
         u16 value = a.Unsigned16();
@@ -691,7 +707,7 @@ public:
         }
     }
     void alu(Alu op, MemR7Imm7s a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void or_(Ab a, Ax b, Ax c) {
@@ -707,7 +723,7 @@ public:
         SetAccAndFlag(c.GetName(), value);
     }
     void or_(Bx a, Bx b, Ax c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     u16 GenericAlbConst(Alb op, u16 a, u16 b) {
@@ -812,7 +828,9 @@ public:
             break;
         }
         case AlbOp::Chng: {
-            c.xor_(b, a);
+            EmitPrint(b.cvt64(), "JIT Chng before b = 0x%lx\n");
+            c.xor_(b.cvt32(), a);
+            EmitPrint(b.cvt64(), "JIT Chng after b = 0x%lx\n");
             c.mov(result, b);
             c.shr(b, 15);
             c.shl(b, decltype(Flags::fm)::position);
@@ -839,7 +857,7 @@ public:
         }
         case AlbOp::Tst0: {
             c.xor_(result, result);
-            c.and_(b, a);
+            c.and_(b.cvt32(), a);
             c.test(b, b);
             c.setnz(result.cvt8());
             break;
@@ -847,7 +865,7 @@ public:
         case AlbOp::Tst1: {
             c.xor_(result, result);
             c.not_(b);
-            c.and_(b, a);
+            c.and_(b.cvt32(), a);
             c.test(b, b);
             c.setnz(result.cvt8());
             break;
@@ -921,11 +939,15 @@ public:
     void alb(Alb op, Imm16 a, Rn b, StepZIDS bs) {
         const Reg64 address = rbx;
         RnAddressAndModify(b.Index(), bs.GetName(), address);
+        EmitPrint(address, "alb address = 0x%lx\n");
         const Reg64 bv = rax;
         LoadFromMemory(bv, address);
+        EmitPrint(bv, "alb bv = 0x%lx\n");
         const Reg64 result = rcx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
+        EmitPrint(result, "alb result = 0x%lx\n");
         if (IsAlbModifying(op)) {
+            EmitPrint(address, "alb store address = 0x%lx\n");
             StoreToMemory(address, result);
         }
     }
@@ -935,17 +957,17 @@ public:
             ProductToBus40(bv, Px{0});
             c.shr(bv, 16);
         } else if (b.GetName() == RegName::a0 || b.GetName() == RegName::a1) {
-            throw UnimplementedException(); // weird effect;
+            unimplemented = true; // weird effect;
         } else {
             RegToBus16(b.GetName(), bv);
         }
-        const Reg16 result = bx;
-        GenericAlb(op, a.Unsigned16(), bv.cvt16(), result);
+        const Reg64 result = rbx;
+        GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
         if (IsAlbModifying(op)) {
             switch (b.GetName()) {
             case RegName::a0:
             case RegName::a1:
-                UNREACHABLE();
+                unimplemented = true;
             // operation on accumulators doesn't go through regular bus with flag and saturation
             case RegName::a0l:
                 c.mov(A[0].cvt16(), result.cvt16());
@@ -960,24 +982,32 @@ public:
                 c.mov(B[1].cvt16(), result.cvt16());
                 break;
             case RegName::a0h:
-                c.shl(result.cvt32(), 16);
-                c.mov(result.cvt16(), A[0].cvt16());
-                c.mov(A[0].cvt32(), result.cvt32());
+                c.shl(result, 48);
+                c.shr(result, 32);
+                c.mov(rsi, 0xFFFF'FFFF'0000'FFFF);
+                c.and_(A[0], rsi);
+                c.or_(A[0], result);
                 break;
             case RegName::a1h:
-                c.shl(result.cvt32(), 16);
-                c.mov(result.cvt16(), A[1].cvt16());
-                c.mov(A[1].cvt32(), result.cvt32());
+                c.shl(result, 48);
+                c.shr(result, 32);
+                c.mov(rsi, 0xFFFF'FFFF'0000'FFFF);
+                c.and_(A[1], rsi);
+                c.or_(A[1], result);
                 break;
             case RegName::b0h:
-                c.shl(result.cvt32(), 16);
-                c.mov(result.cvt16(), B[0].cvt16());
-                c.mov(B[0].cvt32(), result.cvt32());
+                c.shl(result, 48);
+                c.shr(result, 32);
+                c.mov(rsi, 0xFFFF'FFFF'0000'FFFF);
+                c.and_(B[0], rsi);
+                c.or_(B[0], result);
                 break;
             case RegName::b1h:
-                c.shl(result.cvt32(), 16);
-                c.mov(result.cvt16(), B[1].cvt16());
-                c.mov(B[1].cvt32(), result.cvt32());
+                c.shl(result, 48);
+                c.shr(result, 32);
+                c.mov(rsi, 0xFFFF'FFFF'0000'FFFF);
+                c.and_(B[1], rsi);
+                c.or_(B[1], result);
                 break;
             default:
                 RegFromBus16(b.GetName(), result.cvt64()); // including RegName:p (p0h)
@@ -985,7 +1015,7 @@ public:
         }
     }
     void alb_r6(Alb op, Imm16 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void alb(Alb op, Imm16 a, SttMod b) {
         if (IsAlbConst(b)) {
@@ -1019,7 +1049,7 @@ public:
     }
 
     void add(Ab a, Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add(Bx a, Ax b) {
         const Reg64 value_a = rax;
@@ -1031,7 +1061,7 @@ public:
         SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add_p1(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add(Px a, Bx b) {
         const Reg64 value_a = rax;
@@ -1062,45 +1092,45 @@ public:
         SatAndSetAccAndFlag(b.GetName(), result);
     }
     void sub_p1(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub(Px a, Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void app(Ab c, SumBase base, bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void add_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add_sub_sv(ArRn1 a, ArStep1 as, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub_add_sv(ArRn1 a, ArStep1 as, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub_add_i_mov_j_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void sub_add_j_mov_i_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add_sub_i_mov_j(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void add_sub_j_mov_i(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     template <typename T>
@@ -1127,7 +1157,7 @@ public:
                 c.movsxd(value, value.cvt32());
                 return;
             }
-            UNREACHABLE();
+            unimplemented = true;
         }
         c.shl(value, BitSize<T>() - bit_count);
         c.sar(value, BitSize<T>() - bit_count);
@@ -1137,9 +1167,11 @@ public:
         c.xor_(rcx, rcx);
         c.mov(rbx, 0xFF'FFFF'FFFF);
         c.and_(value, rbx);
+        EmitPrint(value, "ShiftBus40: value = 0x%lx\n");
         const Reg64 original_sign = rbx;
         c.mov(original_sign, value);
         c.shr(original_sign, 39);
+        EmitPrint(original_sign, "ShiftBus40: original_sign = 0x%lx\n");
         if ((sv >> 15) == 0) {
             // left shift
             if (sv >= 40) {
@@ -1147,7 +1179,7 @@ public:
                     // regs.fv = value != 0;
                     c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
                     c.test(value, value);
-                    c.setne(cx); // u32 mask = (value != 0) ? 1 : 0
+                    c.setne(cl); // u32 mask = (value != 0) ? 1 : 0
                     c.shl(cx, decltype(Flags::fv)::position); // mask <<= fv_pos
                     c.or_(FLAGS, cx); // flags |= mask
                     // if (regs.fv) {
@@ -1173,12 +1205,12 @@ public:
                     c.cmp(rcx, rdx);
                     c.setne(cl); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv) ? 1 : 0
                     c.shl(cl, decltype(Flags::fv)::position); // mask <<= fv_pos
-                    c.or_(FLAGS, cl); // flags |= mask
+                    c.or_(FLAGS.cvt8(), cl); // flags |= mask
                     // if (regs.fv) {
                     //     regs.fvl = 1;
                     // }
                     c.shr(cl, 3); // mask >>= 3;
-                    c.or_(FLAGS, cl);
+                    c.or_(FLAGS.cvt8(), cl);
                 }
                 c.shl(value, sv); // value <<= sv;
                 // regs.fc0 = (value & ((u64)1 << 40)) != 0;
@@ -1186,14 +1218,14 @@ public:
                 c.bt(value, 40);
                 c.setc(cl); // u32 mask = (value & ((u64)1 << 40));
                 c.shl(cl, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
-                c.or_(FLAGS, cl);
+                c.or_(FLAGS.cvt8(), cl);
             }
         } else {
             // right shift
             u16 nsv = ~sv + 1;
             if (nsv >= 40) {
                 if (blk_key.curr.mod0.s == 0) {
-                    UNREACHABLE();
+                    unimplemented = true;
                     // regs.fc0 = (value >> 39) & 1;
                     // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
                 } else {
@@ -1221,11 +1253,21 @@ public:
         SignExtend(value, 40);
         SetAccFlag(value);
         if (blk_key.curr.mod0.s == 0 && blk_key.curr.mod0.sata == 0) {
-            UNREACHABLE();
-            /*if (regs.fv || SignExtend<32>(value) != value) {
-                regs.flm = 1;
-                value = original_sign == 1 ? 0xFFFF'FFFF'8000'0000 : 0x7FFF'FFFF;
-            }*/
+
+            Xbyak::Label end_label, saturate_label;
+            c.bt(FLAGS, decltype(Flags::fv)::position);
+            c.jc(saturate_label);
+            c.movsxd(rcx, value.cvt32());
+            c.cmp(rcx, value);
+            c.je(end_label);
+            c.L(saturate_label);
+            EmitPrint(value, "ShiftBus40: Doing saturate on value = 0x%lx\n");
+            c.or_(FLAGS, decltype(Flags::flm)::mask);
+            c.mov(value, 0x7FFF'FFFF);
+            c.mov(rcx, 0xFFFF'FFFF'8000'0000);
+            c.cmp(original_sign, 1);
+            c.cmove(value, rcx);
+            c.L(end_label);
         }
         SetAcc(dest, value);
     }
@@ -1348,15 +1390,27 @@ public:
                 break;
             }
             case ModaOp::Neg: {
-                /*GetAcc(acc, a);
-                regs.fc0 = value != 0;                    // ?
-                regs.fv = value == 0xFFFF'FF80'0000'0000; // ?
-                if (regs.fv)
-                    regs.fvl = 1;
-                u64 result = SignExtend<40, u64>(~GetAcc(a) + 1);
-                SatAndSetAccAndFlag(a, result);
-                break;*/
-                UNREACHABLE();
+                GetAcc(acc, a);
+                c.and_(FLAGS, ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
+                const Reg64 scratch = rbx;
+                c.test(acc, acc);
+                c.setnz(scratch.cvt8());
+                c.shl(scratch, decltype(Flags::fc0)::position);
+                c.or_(FLAGS.cvt8(), scratch.cvt8());
+                c.mov(scratch, 0xFFFF'FF80'0000'0000);
+                c.cmp(acc, scratch);
+                c.sete(scratch.cvt8());
+                c.shl(scratch, decltype(Flags::fv)::position);
+                c.or_(FLAGS.cvt8(), scratch.cvt8());
+                // if (regs.fv)
+                //    regs.fvl = 1;
+                c.shr(scratch, decltype(Flags::fv)::position - decltype(Flags::fvl)::position);
+                c.or_(FLAGS.cvt8(), scratch.cvt8());
+                c.not_(acc);
+                c.add(acc, 1);
+                SignExtend(acc, 40);
+                SatAndSetAccAndFlag(a, acc);
+                break;
             }
             case ModaOp::Rnd: {
                 GetAcc(acc, a);
@@ -1370,7 +1424,7 @@ public:
                 u64 result = AddSub(value, 0x8000, false);
                 SatAndSetAccAndFlag(a, result);
                 break;*/
-                UNREACHABLE();
+                unimplemented = true;
             }
             case ModaOp::Clrr: {
                 SatAndSetAccAndFlag(a, 0x8000ULL);
@@ -1411,14 +1465,14 @@ public:
     }
 
     void pacr1(Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void clr(Ab a, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void clrr(Ab a, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void BlockRepeat(Reg64 lc, u32 address) {
@@ -1454,7 +1508,7 @@ public:
         BlockRepeat(lc, address);
     }
     void bkrep_r6(Address18_16 addr_low, Address18_2 addr_high) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     static void DoBkrepStackCopyThunk(JitRegisters* regs) {
@@ -1543,7 +1597,7 @@ public:
     }
 
     void bkreprst(ArRn2 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bkreprst_memsp() {
         const Reg64 sp = rbx;
@@ -1552,7 +1606,7 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void bkrepsto(ArRn2 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bkrepsto_memsp() {
         const Reg64 sp = rbx;
@@ -1600,26 +1654,26 @@ public:
         }
     }
     void bankr() {
-         UNREACHABLE();
+         unimplemented = true;
     }
     void bankr(Ar a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bankr(Ar a, Arp b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bankr(Arp a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void bitrev(Rn a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bitrev_dbrv(Rn a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void bitrev_ebrv(Rn a) {
-         UNREACHABLE();
+         unimplemented = true;
     }
 
     void br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
@@ -1634,16 +1688,17 @@ public:
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         ConditionPass(cond, [&] {
             // note: pc is the address of the NEXT instruction
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc + addr.Relative32());
-            compiling = false;
+            regs.pc += addr.Relative32();
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             if (addr.Relative32() == 0xFFFFFFFF) {
                 c.mov(dword[REGS + offsetof(JitRegisters, idle)], true);
             }
         });
+        compiling = false;
     }
 
     void break_() {
-         UNREACHABLE();
+         unimplemented = true;
     }
 
     void call(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
@@ -1655,7 +1710,7 @@ public:
          compiling = false;
     }
     void calla(Axl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void calla(Ax a) {
         EmitPushPC();
@@ -1666,7 +1721,7 @@ public:
         compiling = false;
     }
     void callr(RelAddr7 addr, Cond cond) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void cntx_s() {
@@ -1725,19 +1780,29 @@ public:
         compiling = false;
     }
     void retd() {
-        UNREACHABLE();
+        unimplemented = true;
     }
-    void reti(Cond c) {
-        UNREACHABLE();
+    void reti(Cond cond) {
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        ConditionPass(cond, [&]{
+            EmitPopPC();
+            c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
+        });
+        compiling = false;
     }
-    void retic(Cond c) {
-        UNREACHABLE();
+    void retic(Cond cond) {
+        ConditionPass(cond, [&] {
+            EmitPopPC();
+            c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
+            cntx_r();
+        });
+        compiling = false;
     }
     void retid() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void retidc() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void rets(Imm8 a) {
         EmitPopPC();
@@ -1777,15 +1842,15 @@ public:
     }
     void load_modi(Imm9 a) {
         c.mov(ax, word[REGS + offsetof(JitRegisters, cfgi)]);
-        c.and_(ax, ~decltype(Cfg::mod)::mask);
-        c.or_(ax, a.Unsigned16() << decltype(Cfg::mod)::position);
+        c.and_(rax, ~decltype(Cfg::mod)::mask);
+        c.or_(rax, a.Unsigned16() << decltype(Cfg::mod)::position);
         c.mov(word[REGS + offsetof(JitRegisters, cfgi)], ax);
         blk_key.curr.cfgi.mod.Assign(a.Unsigned16());
     }
     void load_modj(Imm9 a) {
         c.mov(ax, word[REGS + offsetof(JitRegisters, cfgj)]);
-        c.and_(ax, ~decltype(Cfg::mod)::mask);
-        c.or_(ax, a.Unsigned16() << decltype(Cfg::mod)::position);
+        c.and_(rax, ~decltype(Cfg::mod)::mask);
+        c.or_(rax, a.Unsigned16() << decltype(Cfg::mod)::position);
         c.mov(word[REGS + offsetof(JitRegisters, cfgj)], ax);
         blk_key.curr.cfgj.mod.Assign(a.Unsigned16());
     }
@@ -1869,7 +1934,7 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_prpage() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void push(Px a) {
         const Reg64 value = rbx;
@@ -1956,41 +2021,101 @@ public:
     void pop(Register a) {
         const Reg64 sp = rbx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
-        const Reg64 value = rax;
+        const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
         RegFromBus16(a.GetName(), value);
     }
     void pop(Abe a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.movsx(value.cvt32(), value.cvt8());
+        c.shl(value, 32);
+        c.mov(value.cvt32(), GetAccDirect(a.GetName()));
+        SetAccAndFlag(a.GetName(), value);
     }
     void pop(ArArpSttMod a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        RegFromBus16(a.GetName(), value);
     }
     void pop(Bx a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void pop_prpage() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void pop(Px a) {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.shl(value, 16);
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        ProductFromBus32(a, value.cvt32());
     }
     void pop_r6() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        RegFromBus16(RegName::r6, value);
     }
     void pop_repc() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
     }
     void pop_x0() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.rorx(FACTORS, FACTORS, 32);
+        c.mov(FACTORS.cvt16(), value.cvt16());
+        c.rorx(FACTORS, FACTORS, 32);
     }
     void pop_x1() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.rorx(FACTORS, FACTORS, 48);
+        c.mov(FACTORS.cvt16(), value.cvt16());
+        c.rorx(FACTORS, FACTORS, 16);
     }
     void pop_y1() {
-        UNREACHABLE();
+        const Reg64 sp = rbx;
+        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 value = rcx;
+        LoadFromMemory(value, sp);
+        c.add(sp, 1);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.rorx(FACTORS, FACTORS, 16);
+        c.mov(FACTORS.cvt16(), value.cvt16());
+        c.rorx(FACTORS, FACTORS, 48);
     }
     void popa(Ab a) {
         const Reg64 value = rbx;
@@ -2021,14 +2146,18 @@ public:
         }
     }
     void rep(Register a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void rep_r6() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void shfc(Ab a, Ab b, Cond cond) {
-        UNREACHABLE();
+        ConditionPass(cond, [&] {
+            const Reg64 value = rax;
+            GetAcc(value, a.GetName());
+            ShiftBus40(value, blk_key.sv, b.GetName());
+        });
     }
     void shfi(Ab a, Ab b, Imm6s s) {
         const Reg64 value = rax;
@@ -2038,13 +2167,13 @@ public:
     }
 
     void tst4b(ArRn2 b, ArStep2 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void tst4b(ArRn2 b, ArStep2 bs, Ax c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void tstb(MemImm8 a, Imm4 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void tstb(Rn a, StepZIDS as, Imm4 b) {
         const Reg64 address = rax;
@@ -2058,17 +2187,25 @@ public:
         c.or_(FLAGS, eax);
     }
     void tstb(Register a, Imm4 b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value);
+        const Reg64 mask = rbx;
+        c.xor_(mask, mask);
+        c.and_(FLAGS, ~decltype(Flags::fz)::mask); // clear fz
+        c.bt(value, b.Unsigned16());
+        c.setc(mask.cvt8());
+        c.shl(mask, decltype(Flags::fz)::position);
+        c.or_(FLAGS, mask);
     }
     void tstb_r6(Imm4 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void tstb(SttMod a, Imm16 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void and_(Ab a, Ab b, Ax c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void dint() {
@@ -2079,22 +2216,22 @@ public:
     }
 
     void mul(Mul3 op, Rn y, StepZIDS ys, Imm16 x, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mul_y0(Mul3 op, Rn x, StepZIDS xs, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mul_y0(Mul3 op, Register x, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mul(Mul3 op, R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mul_y0_r6(Mul3 op, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mul_y0(Mul2 op, MemImm8 x, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mpyi(Imm8s x) {
@@ -2105,19 +2242,19 @@ public:
     }
 
     void msu(R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void msu(Rn y, StepZIDS ys, Imm16 x, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void msusu(ArRn2 x, ArStep2 xs, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mac_x1to0(Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mac1(ArpRn1 xy, ArpStep1 xis, ArpStep1 yjs, Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void modr(Rn a, StepZIDS as) {
@@ -2131,7 +2268,7 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_dmod(Rn a, StepZIDS as) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_i2(Rn a) {
         u32 unit = a.Index();
@@ -2144,7 +2281,7 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_i2_dmod(Rn a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_d2(Rn a) {
         u32 unit = a.Index();
@@ -2157,19 +2294,19 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_d2_dmod(Rn a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_eemod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_edmod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_demod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void modr_ddmod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void ProgramRead(Reg64 out, Reg64 address) {
@@ -2178,10 +2315,10 @@ public:
     }
 
     void movd(R0123 a, StepZIDS as, R45 b, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movp(Axl a, Register b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movp(Ax a, Register b) {
         const Reg64 address = rax;
@@ -2192,26 +2329,26 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void movp(Rn a, StepZIDS as, R0123 b, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movpdw(Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov(Ab a, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_dvm(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_x0(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_x1(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_y1(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     static void MemDataWriteThunk(void* mem_ptr, u16 address, u16 data) {
@@ -2225,12 +2362,12 @@ public:
     template <typename T1, typename T2>
     void StoreToMemory(T1 addr, T2 value) {
         // TODO: Non MMIO writes can be performed inside the JIT.
-        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 0);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         c.mov(ABI_PARAM2, addr);
         c.mov(ABI_PARAM3, value);
         CallFarFunction(c, MemDataWriteThunk);
-        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 0);
     }
 
     void mov(Ablh a, MemImm8 b) {
@@ -2244,7 +2381,7 @@ public:
         StoreToMemory(b.Unsigned16(), value16);
     }
     void mov(Axl a, MemR7Imm16 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Axl a, MemR7Imm7s b) {
         const Reg64 value16 = rbx;
@@ -2271,7 +2408,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_eu(MemImm8 a, Axh b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(MemImm8 a, RnOld b) {
         const Reg64 value = rax;
@@ -2282,13 +2419,14 @@ public:
         const Reg64 value = rbx;
         LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
         c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         compiling = false; // Static state changed, end block
     }
     void mov_dvm_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_icr_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Imm16 a, Bx b) {
         u16 value = a.Unsigned16();
@@ -2299,10 +2437,10 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_icr(Imm5 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Imm8s a, Axh b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Imm8s a, RnOld b) {
         u16 value = a.Signed16();
@@ -2318,7 +2456,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm16 a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(MemR7Imm7s a, Ax b) {
         const Reg64 address = rax;
@@ -2329,7 +2467,11 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Bx b) {
-        UNREACHABLE();
+        const Reg64 address = rax;
+        RnAddressAndModify(a.Index(), as.GetName(), address);
+        const Reg64 value = rbx;
+        LoadFromMemory(value, address);
+        RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Register b) {
         const Reg64 address = rax;
@@ -2339,7 +2481,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_memsp_to(Register b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_mixp_to(Register b) {
         const Reg64 value = rax;
@@ -2352,10 +2494,12 @@ public:
         StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), value);
     }
     void mov_icr(Register a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_mixp(Register a) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value, true);
+        c.mov(word[REGS + offsetof(JitRegisters, mixp)], value.cvt16());
     }
     void mov(Register a, Rn b, StepZIDS bs) {
         // a = a0 or a1 is overrided
@@ -2400,29 +2544,35 @@ public:
         }
     }
     void mov_repc_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_sv_to(MemImm8 b) {
         StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), blk_key.sv);
     }
     void mov_x0_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_x1_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_y1_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Imm16 a, ArArp b) {
         u16 value = a.Unsigned16();
         RegFromBus16(b.GetName(), value);
     }
     void mov_r6(Imm16 a) {
-        UNREACHABLE();
+        u16 value = a.Unsigned16();
+        RegFromBus16(RegName::r6, value);
     }
+
+    static void ThrowException() {
+        throw UnimplementedException();
+    }
+
     void mov_repc(Imm16 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_stepi0(Imm16 a) {
         u16 value = a.Unsigned16();
@@ -2439,14 +2589,22 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_prpage(Imm4 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_a0h_stepi0() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(RegName::a0h, value, true);
+        c.mov(word[REGS + offsetof(JitRegisters, stepi0)], value.cvt16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        compiling = false;
     }
     void mov_a0h_stepj0() {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        RegToBus16(RegName::a0h, value, true);
+        c.mov(word[REGS + offsetof(JitRegisters, stepj0)], value.cvt16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        compiling = false;
     }
     void mov_stepi0_a0h() {
         RegFromBus16(RegName::a0h, blk_key.curr.stepi0);
@@ -2456,10 +2614,10 @@ public:
     }
 
     void mov_prpage(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_repc(Abl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(Abl a, ArArp b) {
         const Reg64 value = rax;
@@ -2473,10 +2631,10 @@ public:
     }
 
     void mov_prpage_to(Abl b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_repc_to(Abl b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(ArArp a, Abl b) {
         const Reg64 value = rax;
@@ -2490,76 +2648,98 @@ public:
     }
 
     void mov_repc_to(ArRn1 b, ArStep1 bs) {
-         UNREACHABLE();
+         unimplemented = true;
     }
     void mov(ArArp a, ArRn1 b, ArStep1 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(SttMod a, ArRn1 b, ArStep1 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_repc(ArRn1 a, ArStep1 as) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(ArRn1 a, ArStep1 as, ArArp b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(ArRn1 a, ArStep1 as, SttMod b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_repc_to(MemR7Imm16 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(ArArpSttMod a, MemR7Imm16 b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_repc(MemR7Imm16 a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov(MemR7Imm16 a, ArArpSttMod b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_pc(Ax a) {
-        UNREACHABLE();
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], GetAccDirect(a.GetName()).cvt32());
+        compiling = false;
     }
     void mov_pc(Bx a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_mixp_to(Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_mixp_r6() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_p0h_to(Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_p0h_r6() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_p0h_to(Register b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_p0(Ab a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_p1_to(Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov2(Px a, ArRn2 b, ArStep2 bs) {
-        UNREACHABLE();
+        const Reg64 value = rbx;
+        c.mov(value, dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * a.Index()]);
+        u16 unit = GetArRnUnit(b);
+        const Reg64 address = rcx;
+        RnAddressAndModify(unit, GetArStep(bs), address);
+        const Reg64 address2 = rax;
+        c.mov(address2, address);
+        OffsetAddress(unit, address2.cvt16(), GetArOffset(bs));
+        // NOTE: keep the write order exactly like this.
+        StoreToMemory(address2, value);
+        c.shr(value, 16);
+        StoreToMemory(address, value);
     }
     void mov2s(Px a, ArRn2 b, ArStep2 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov2(ArRn2 a, ArStep2 as, Px b) {
-        UNREACHABLE();
+        u16 unit = GetArRnUnit(a);
+        const Reg64 address = rbx;
+        RnAddressAndModify(unit, GetArStep(as), address);
+        const Reg64 address2 = rax;
+        c.mov(address2, address);
+        OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
+        const Reg64 value = rcx;
+        LoadFromMemory(value, address2);
+        c.shl(value, 16);
+        LoadFromMemory(value, address);
+        ProductFromBus32(b, value.cvt32());
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
         u16 unit = GetArRnUnit(b);
@@ -2592,10 +2772,10 @@ public:
     }
 
     void mov_r6_to(Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_r6_mixp() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_r6_to(Register b) {
         const Reg64 value = rax;
@@ -2608,49 +2788,52 @@ public:
         RegFromBus16(RegName::r6, value);
     }
     void mov_memsp_r6() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_r6_to(Rn b, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_r6(Rn a, StepZIDS as) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov2_axh_m_y0_m(Axh a, ArRn2 b, ArStep2 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov2_ax_mij(Ab a, ArpRn1 b, ArpStep1 bsi, ArpStep1 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov2_ax_mji(Ab a, ArpRn1 b, ArpStep1 bsi, ArpStep1 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov2_mij_ax(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov2_mji_ax(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov2_abh_m(Abh ax, Abh ay, ArRn1 b, ArStep1 bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exchange_iaj(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exchange_riaj(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exchange_jai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exchange_rjai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void movs(MemImm8 a, Ab b) {
-        UNREACHABLE();
+        const Reg64 value = rax;
+        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        SignExtend(value, 16);
+        ShiftBus40(value, blk_key.sv, b.GetName());
     }
     void movs(Rn a, StepZIDS as, Ab b) {
         const Reg64 address = rax;
@@ -2667,7 +2850,7 @@ public:
         ShiftBus40(value, blk_key.sv, b.GetName());
     }
     void movs_r6_to(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movsi(RnOld a, Ab b, Imm5s s) {
         const Reg64 value = rax;
@@ -2678,262 +2861,262 @@ public:
     }
 
     void movr(ArRn2 a, ArStep2 as, Abh b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movr(Rn a, StepZIDS as, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movr(Register a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movr(Bx a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void movr_r6_to(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void exp(Bx a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp(Bx a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp(Rn a, StepZIDS as) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp(Rn a, StepZIDS as, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp(Register a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp(Register a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp_r6() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void exp_r6(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void lim(Ax a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void vtrclr0() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrclr1() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrclr() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrmov0(Axl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrmov1(Axl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrmov(Axl a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void vtrshr() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void clrp0() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void clrp1() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void clrp() {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void max_ge(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max_gt(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min_le(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min_lt(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void max_ge_r0(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max_gt_r0(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min_le_r0(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min_lt_r0(Ax a, StepZIDS bs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void divs(MemImm8 a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void sqr_sqr_add3(Ab a, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void sqr_sqr_add3(ArRn2 a, ArStep2 as, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void sqr_mpysu_add3a(Ab a, Ab b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void cmp(Ax a, Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cmp_b0_b1() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cmp_b1_b0() {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cmp(Bx a, Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cmp_p1_to(Ax b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void max2_vtr(Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr(Ax a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr(Ax a, Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr(Ax a, Bx b) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void max2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void min2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     template <typename ArpStepX>
     void mov_sv_app(ArRn1 a, ArpStepX as, Bx b, SumBase base, bool sub_p0, bool p0_align,
                     bool sub_p1, bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void cbs(Axh a, CbsCond c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cbs(Axh a, Bxh b, CbsCond c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void cbs(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, CbsCond c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
              bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     template <typename ArpRnX, typename ArpStepX>
     void mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
              bool sub_p1, bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma_mx_xy(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma_xy_mx(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma_mov(Axh u, Bxh v, ArRn1 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign,
                  bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                  bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mma_mov(ArRn2 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                  bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                  bool p1_align) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void addhp(ArRn2 a, ArStep2 as, Px b, Ax c) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
     void mov_ext0(Imm8s a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_ext1(Imm8s a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_ext2(Imm8s a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
     void mov_ext3(Imm8s a) {
-        UNREACHABLE();
+        unimplemented = true;
     }
 
 private:
@@ -3049,7 +3232,7 @@ private:
         case RegName::a1e:
         case RegName::b0e:
         case RegName::b1e:
-            UNREACHABLE();
+            unimplemented = true;
 
         case RegName::r0:
             c.movzx(out, R0_1_2_3.cvt16());
@@ -3077,6 +3260,12 @@ private:
             break;
         case RegName::y0:
             c.movzx(out, FACTORS.cvt16());
+            break;
+
+        case RegName::p:
+            ProductToBus40(out, Px{0});
+            c.shr(out, 16);
+            c.and_(out, 0xFFFF);
             break;
 
         case RegName::sp:
@@ -3172,7 +3361,7 @@ private:
             c.mov(out, B[1]);
             break;
         default:
-            UNREACHABLE();
+            unimplemented = true;
         }
     }
 
@@ -3223,7 +3412,7 @@ private:
         case RegName::a1h:
         case RegName::b0h:
         case RegName::b1h:
-            c.shr(value, 16);
+            c.shl(value, 16);
             SignExtend(value, 32);
             SatAndSetAccAndFlag(reg, value);
             break;
@@ -3276,6 +3465,11 @@ private:
         case RegName::y0:
             c.mov(FACTORS.cvt16(), value.cvt16());
             break;
+        case RegName::p:
+            c.cmp(value.cvt16(), 0x7FFF);
+            c.setg(byte[REGS + offsetof(JitRegisters, pe)]);
+            c.mov(word[REGS + offsetof(JitRegisters, p) + sizeof(u16)], value.cvt16());
+            break;
 
         case RegName::sv:
             c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
@@ -3283,12 +3477,77 @@ private:
             compiling = false;
             break;
 
+        case RegName::lc:
+            regs.SetLc(c, value);
+            break;
+
+        case RegName::cfgi:
+            c.mov(word[REGS + offsetof(JitRegisters, cfgi)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::cfgj:
+            c.mov(word[REGS + offsetof(JitRegisters, cfgj)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+
+        case RegName::stt0:
+            regs.SetStt0(c, value);
+            break;
+        case RegName::stt1:
+            regs.SetStt1(c, value);
+            break;
+        case RegName::stt2:
+            regs.SetStt2(c, value);
+            break;
+
+        case RegName::mod0:
+            c.mov(word[REGS + offsetof(JitRegisters, mod0)], blk_key.curr.mod0.raw);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false;
+            break;
+        case RegName::mod1:
+            c.mov(word[REGS + offsetof(JitRegisters, mod1)], blk_key.curr.mod1.raw);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false;
+            break;
+        case RegName::mod2:
+            c.mov(word[REGS + offsetof(JitRegisters, mod2)], blk_key.curr.mod2.raw);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false;
+            break;
         case RegName::mod3:
             regs.SetMod3(c, value);
             break;
 
         case RegName::ar0:
             c.mov(word[REGS + offsetof(JitRegisters, ar)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::ar1:
+            c.mov(word[REGS + offsetof(JitRegisters, ar) + sizeof(u16)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::arp0:
+            c.mov(word[REGS + offsetof(JitRegisters, arp)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::arp1:
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16)], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::arp2:
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 2], value.cvt16());
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+        case RegName::arp3:
+            c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 3], value.cvt16());
             c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
@@ -3322,7 +3581,7 @@ private:
         case RegName::a1e:
         case RegName::b0e:
         case RegName::b1e:
-            UNREACHABLE();
+            unimplemented = true;
 
         case RegName::r0:
             c.mov(R0_1_2_3.cvt16(), value);
@@ -3430,7 +3689,8 @@ private:
             break;
 
         default:
-            UNREACHABLE();
+            //UNREACHABLE();
+            unimplemented = true;
         }
     }
 
@@ -3578,9 +3838,11 @@ private:
 
     void ProductToBus40(Reg64 value, Px reg) {
         const u16 unit = reg.Index();
-        c.mov(value.cvt16(), word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit]);
+        c.mov(value, word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit]);
         c.shl(value, 32);
-        c.mov(value.cvt32(), dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit]);
+        c.xor_(rsi, rsi);
+        c.mov(esi, dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit]);
+        c.or_(value, rsi);
         switch (unit == 0 ? blk_key.curr.mod0.ps0.Value() : blk_key.curr.mod0.ps1.Value()) {
         case 0:
             SignExtend(value, 33);
@@ -3602,7 +3864,24 @@ private:
 
     void RnAddress(u32 unit, Reg64 value) {
         if (blk_key.curr.mod2.IsBr(unit) && !blk_key.curr.mod2.IsM(unit)) {
-            UNREACHABLE();
+            c.rol(value.cvt16(), 8);
+            c.mov(esi, value.cvt32());
+            c.and_(esi, 3855);
+            c.shl(esi, 4);
+            c.shr(value.cvt32(), 4);
+            c.and_(value.cvt32(), 3855);
+            c.or_(value.cvt32(), esi);
+            c.mov(esi, value.cvt32());
+            c.and_(esi, 13107);
+            c.shr(value.cvt32(), 2);
+            c.and_(value.cvt32(), 13107);
+            c.lea(esi, ptr[value + 4*rsi]);
+            c.mov(edx, esi);
+            c.and_(edx, 21845);
+            c.shr(esi, 1);
+            c.and_(esi, 21845);
+            c.lea(esi, ptr[rsi + 2*rdx]);
+            c.mov(value.cvt32(), esi);
         }
     }
 
@@ -3631,7 +3910,7 @@ private:
                 c.add(address, 1);
                 return;
             }
-            UNREACHABLE();
+            unimplemented = true;
             //if ((address & mask) == mod)
             //    return address & ~mask;
             //return address + 1;
@@ -3640,7 +3919,7 @@ private:
                 c.sub(address, 1);
                 return;
             }
-            throw UnimplementedException();
+            unimplemented = true;
             // TODO: sometimes this would return two addresses,
             // neither of which is the original Rn value.
             // This only happens for memory writing, but not for memory reading.
@@ -3748,8 +4027,10 @@ private:
                             c.mov(scratch, address);
                             c.and_(scratch, mask);
                             c.cmp(scratch, mod);
-                            c.xor_(scratch, scratch);
-                            c.cmove(next, scratch);
+                            c.setne(scratch.cvt8());
+                            c.shl(scratch, 15);
+                            c.sar(scratch, 15);
+                            c.and_(next, scratch);
                         }
                     } else {
                         if (!((!step2_mode2 || mod != mask))) {
@@ -3758,7 +4039,7 @@ private:
                             c.and_(next, mask);
                         } else {
                             c.mov(next, address);
-                            c.add(next, s);
+                            c.add(next.cvt32(), s);
                             c.and_(next, mask);
                             c.mov(scratch, mod);
                             c.test(address, mask);
@@ -3784,7 +4065,7 @@ private:
                         c.mov(scratch, mod + 1);
                         c.test(next, next);
                         c.cmovz(next, scratch);
-                        c.add(next, s);
+                        c.add(next.cvt32(), s);
                         c.and_(next, mask);
                     }
                     c.and_(address, ~mask);
@@ -3809,8 +4090,32 @@ private:
                 case 0:
                     c.xor_(R0_1_2_3.cvt16(), R0_1_2_3.cvt16());
                     break;
+                case 1:
+                    c.mov(rsi, 0xFFFFFFFF0000FFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
+                case 2:
+                    c.mov(rsi, 0xFFFF0000FFFFFFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
+                case 3:
+                    c.mov(rsi, 0x0000FFFFFFFFFFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
                 case 4:
                     c.xor_(R4_5_6_7.cvt16(), R4_5_6_7.cvt16());
+                    break;
+                case 5:
+                    c.mov(rsi, 0xFFFFFFFF0000FFFFULL);
+                    c.and_(R4_5_6_7, rsi);
+                    break;
+                case 6:
+                    c.mov(rsi, 0xFFFF0000FFFFFFFFULL);
+                    c.and_(R4_5_6_7, rsi);
+                    break;
+                case 7:
+                    c.mov(rsi, 0x0000FFFFFFFFFFFFULL);
+                    c.and_(R4_5_6_7, rsi);
                     break;
                 default:
                     UNREACHABLE();
@@ -3829,6 +4134,16 @@ private:
             c.movzx(out, R0_1_2_3.cvt16());
             c.rol(R0_1_2_3, 16);
             break;
+        case 2:
+            c.ror(R0_1_2_3, 32);
+            StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            c.rol(R0_1_2_3, 32);
+            break;
+        case 3:
+            c.ror(R0_1_2_3, 48);
+            StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            c.rol(R0_1_2_3, 48);
+            break;
         case 4:
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
             c.movzx(out, R4_5_6_7.cvt16());
@@ -3838,6 +4153,16 @@ private:
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
             c.movzx(out, R4_5_6_7.cvt16());
             c.rol(R4_5_6_7, 16);
+            break;
+        case 6:
+            c.ror(R4_5_6_7, 32);
+            StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.rol(R4_5_6_7, 32);
+            break;
+        case 7:
+            c.ror(R4_5_6_7, 48);
+            StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.rol(R4_5_6_7, 48);
             break;
         default:
             UNREACHABLE();
@@ -3868,6 +4193,14 @@ private:
             c.rorx(out, R4_5_6_7, 16);
             c.movzx(out, out.cvt16()); // Needed?
             break;
+        case 6:
+            c.rorx(out, R4_5_6_7, 32);
+            c.movzx(out, out.cvt16()); // Needed?
+            break;
+        case 7:
+            c.rorx(out, R4_5_6_7, 48);
+            c.movzx(out, out.cvt16()); // Needed?
+            break;
         default:
             UNREACHABLE();
         }
@@ -3879,8 +4212,32 @@ private:
                 case 0:
                     c.xor_(R0_1_2_3.cvt16(), R0_1_2_3.cvt16());
                     break;
+                case 1:
+                    c.mov(rsi, 0xFFFFFFFF0000FFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
+                case 2:
+                    c.mov(rsi, 0xFFFF0000FFFFFFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
+                case 3:
+                    c.mov(rsi, 0x0000FFFFFFFFFFFFULL);
+                    c.and_(R0_1_2_3, rsi);
+                    break;
                 case 4:
                     c.xor_(R4_5_6_7.cvt16(), R4_5_6_7.cvt16());
+                    break;
+                case 5:
+                    c.mov(rsi, 0xFFFFFFFF0000FFFFULL);
+                    c.and_(R4_5_6_7, rsi);
+                    break;
+                case 6:
+                    c.mov(rsi, 0xFFFF0000FFFFFFFFULL);
+                    c.and_(R4_5_6_7, rsi);
+                    break;
+                case 7:
+                    c.mov(rsi, 0x0000FFFFFFFFFFFFULL);
+                    c.and_(R4_5_6_7, rsi);
                     break;
                 default:
                     UNREACHABLE();
@@ -3911,9 +4268,19 @@ private:
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
             break;
         case 5:
-            c.ror(R4_5_6_7, 16);
+            c.rorx(R4_5_6_7, R4_5_6_7, 16);
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
-            c.rol(R4_5_6_7, 16);
+            c.rorx(R4_5_6_7, R4_5_6_7, 48);
+            break;
+        case 6:
+            c.ror(R4_5_6_7, 32);
+            StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.rol(R4_5_6_7, 32);
+            break;
+        case 7:
+            c.ror(R4_5_6_7, 48);
+            StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.rol(R4_5_6_7, 48);
             break;
         default:
             UNREACHABLE();
@@ -4006,6 +4373,13 @@ private:
         return static_cast<OffsetValue>(value);
     }
 
+    void ProductFromBus32(Px reg, Reg32 value) {
+        u16 unit = reg.Index();
+        c.mov(dword[REGS + offsetof(JitRegisters, p) + unit * sizeof(u32)], value);
+        c.bt(value, 31);
+        c.setc(word[REGS + offsetof(JitRegisters, pe) + unit * sizeof(u16)]);
+    }
+
     bool CompareRegisterState() {
         using Frame = JitRegisters::BlockRepeatFrame;
         bool result = true;
@@ -4013,12 +4387,13 @@ private:
         if (!(std::memcmp(raw.data(), debug_interp->mem.GetMemory().raw.data(), raw.size()) == 0)) {
             printf("Memory does not match!\n");
             for (size_t i = 0; i < raw.size(); i += 2) {
-                if (debug_interp->mem.GetMemory().raw[i] != raw[i]) {
-                    printf("Word 0x%lx mismatch (interp: 0x%x, jit: 0x%x)\n", i >> 1, *(u16*)&debug_interp->mem.GetMemory().raw[i],
-                           *(u16*)&raw[i]);
+                const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[i];
+                const u16 jit = *(u16*)&raw[i];
+                if (interp != jit && !(interp == (iregs->pc & 0xFFFF) && jit == (regs.pc & 0xFFFF))) {
+                    printf("Word 0x%lx mismatch (interp: 0x%x, jit: 0x%x)\n", i >> 1, interp, jit);
+                    result = false;
                 }
             }
-            result = false;
         }
         if (!(regs.pc == iregs->pc && regs.r == iregs->r && regs.cpc == iregs->cpc && regs.prpage == iregs->prpage && regs.repc == iregs->repc && regs.repcs == iregs->repcs)) {
             printf("Failed part 0 of checks\n");

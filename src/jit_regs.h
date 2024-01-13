@@ -37,6 +37,7 @@ constexpr Reg32 FLAGS = edi;
 
 // This doesn't represent an actual register but the current status flags of the JIT
 union Flags {
+    u16 raw;
     BitField<0, 1, u16> fr;
     BitField<1, 1, u16> flm; // set on saturation
     BitField<2, 1, u16> fvl; // Rn zero flag
@@ -204,11 +205,23 @@ union Stt0 {
 };
 
 union Stt1 {
+    u16 raw;
     BitField<4, 1, u16> fr;
     BitField<10, 1, u16> iu0;
     BitField<11, 1, u16> iu1;
     BitField<14, 1, u16> pe0;
     BitField<15, 1, u16> pe1;
+};
+
+union Stt2 {
+    u16 raw;
+    BitField<0, 1, u16> ip0;
+    BitField<1, 1, u16> ip1;
+    BitField<2, 1, u16> ip2;
+    BitField<3, 1, u16> ipv;
+    BitField<6, 2, u16> pcmhi;
+    BitField<12, 3, u16> bcn;
+    BitField<15, 1, u16> lp;
 };
 
 union St0 {
@@ -318,6 +331,20 @@ struct JitRegisters {
         c.mov(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
         c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
         c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) + rsi * 4]);
+    }
+
+    void SetLc(Xbyak::CodeGenerator& c, Reg64 value) {
+        Xbyak::Label end_label, not_in_loop;
+        c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
+        c.jz(not_in_loop);
+        c.movzx(rsi, word[REGS + offsetof(JitRegisters, bcn)]);
+        c.sub(rsi, 1);
+        c.lea(rsi, ptr[rsi + rsi * 2]);
+        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) + rsi * 4], value.cvt16());
+        c.jmp(end_label);
+        c.L(not_in_loop);
+        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)], value.cvt16());
+        c.L(end_label);
     }
 
     /** Computation unit **/
@@ -482,11 +509,13 @@ struct JitRegisters {
     }
 
     template <typename T>
-    void SetStt0(Xbyak::CodeGenerator& c, Xbyak::Reg16 scratch, T value) {
+    void SetStt0(Xbyak::CodeGenerator& c, T value) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
-            UNREACHABLE();
+            c.and_(FLAGS, decltype(Flags::fr)::mask);
+            c.shl(value, 1);
+            c.or_(FLAGS.cvt16(), value.cvt16());
         } else {
-            c.and_(FLAGS, decltype(Flags::fz)::mask);
+            c.and_(FLAGS, decltype(Flags::fr)::mask);
             c.or_(FLAGS, value << 1);
         }
     }
@@ -505,6 +534,23 @@ struct JitRegisters {
         c.shr(esi, 15);
         c.or_(out.cvt8(), esi.cvt8());
         c.ror(out, 2);
+    }
+
+    template <typename T>
+    void SetStt1(Xbyak::CodeGenerator& c, T value) {
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            c.and_(value, decltype(Stt1::fr)::mask | decltype(Stt1::pe0)::mask
+                              | decltype(Stt1::pe1)::mask); // mask out read only bits
+            c.shr(value, decltype(Stt1::fr)::position);
+            c.and_(FLAGS, ~decltype(Flags::fr)::mask); // clear fr
+            c.or_(FLAGS.cvt8(), value.cvt8());
+            c.bt(value, decltype(Stt1::pe0)::position - decltype(Stt1::fr)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, pe)]);
+            c.bt(value, decltype(Stt1::pe1)::position - decltype(Stt1::fr)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, pe) + sizeof(u16)]);
+        } else {
+            UNREACHABLE();
+        }
     }
 
     void GetStt2(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
@@ -526,6 +572,21 @@ struct JitRegisters {
         c.or_(out, si);
         c.shr(rsi, 15);
         c.or_(out, si);
+    }
+
+    template <typename T>
+    void SetStt2(Xbyak::CodeGenerator& c, T value) {
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            // Most members are ready only, great for us :)
+            // Mask out read only bits
+            c.and_(value, decltype(Stt2::lp)::mask | decltype(Stt2::pcmhi)::mask);
+            c.bt(value, decltype(Stt2::lp)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, lp)]);
+            c.shr(value, decltype(Stt2::pcmhi)::position);
+            c.mov(byte[REGS + offsetof(JitRegisters, pcmhi)], value.cvt8());
+        } else {
+            UNREACHABLE();
+        }
     }
 
     template <typename T>

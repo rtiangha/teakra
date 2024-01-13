@@ -1,3 +1,4 @@
+#pragma clang optimize off
 #include <array>
 #include <cstdio>
 #include <cstdlib>

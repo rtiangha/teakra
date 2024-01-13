@@ -71,7 +71,7 @@ public:
         }
     }
 
-    void Run(u64 cycles) {
+    void Run(u64 cycles, s32 cycles_remaining = 0) {
         idle = false;
         for (u64 i = 0; i < cycles; ++i) {
             if (idle) {
@@ -114,11 +114,13 @@ public:
                 }
             }
 
+            const bool old_idle = idle;
+
             decoder.call(*this, opcode, expand_value);
 
             // I am not sure if a single-instruction loop is interruptable and how it is handled,
             // so just disable interrupt for it for now.
-            if (regs.ie && !regs.rep) {
+            if (regs.ie && !regs.rep && i == cycles - 1) {
                 bool interrupt_handled = false;
                 for (u32 i = 0; i < regs.im.size(); ++i) {
                     if (regs.im[i] && regs.ip[i]) {
@@ -143,12 +145,16 @@ public:
                     if (vinterrupt_context_switch) {
                         ContextStore();
                     }
-                    core_timing.Tick();
-                    return; // Do not execute further, so the jit can catch up
                 }
             }
 
             core_timing.Tick();
+
+            if (!old_idle && idle) {
+                // We have entered idle state, run the remainder of the the slice, like the JIT would
+                cycles = cycles_remaining;
+                i = 0;
+            }
         }
     }
 
@@ -1026,8 +1032,6 @@ public:
         }
         regs.bkrep_stack[0].end = mem.DataRead(address_reg++) | (((flag >> 8) & 3) << 16);
         regs.bkrep_stack[0].start = mem.DataRead(address_reg++) | ((flag & 3) << 16);
-        printf("INTERP: Start = 0x%x\n", regs.bkrep_stack[0].start);
-        printf("INTERP: End = 0x%x\n", regs.bkrep_stack[0].end);
         regs.bkrep_stack[0].lc = mem.DataRead(address_reg++);
     }
     void StoreBlockRepeat(u16& address_reg) {
@@ -1861,6 +1865,7 @@ public:
             // b loses its typical meaning in this case
             RegName b_name = b.GetNameForMovFromP();
             u64 value = ProductToBus40(Px{0});
+            printf("Interp value = 0x%lx\n", value);
             SatAndSetAccAndFlag(b_name, value);
         } else if (a.GetName() == RegName::pc) {
             if (b.GetName() == RegName::a0 || b.GetName() == RegName::a1) {
@@ -2125,6 +2130,7 @@ public:
     }
     void mov_r6(Register a) {
         u16 value = RegToBus16(a.GetName(), true);
+        printf("mov_r6 value = 0x%x\n", value);
         regs.r[6] = value;
     }
     void mov_memsp_r6() {
@@ -3739,6 +3745,7 @@ public:
         read_count["p"]++;
         read_count["pe"]++;
         u64 value = regs.p[unit] | ((u64)regs.pe[unit] << 32);
+        printf("Interp value before shift = 0x%lx\n", value);
         switch (regs.ps[unit]) {
         case 0:
             value = SignExtend<33>(value);

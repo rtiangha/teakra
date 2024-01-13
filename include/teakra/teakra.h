@@ -29,6 +29,7 @@ public:
     void Reset();
 
     std::array<std::uint8_t, 0x80000>& GetDspMemory();
+    std::array<std::uint8_t, 0x80000>& GetInterpDspMemory();
     const std::array<std::uint8_t, 0x80000>& GetDspMemory() const;
 
     // APBP Data
@@ -80,5 +81,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
+    std::unique_ptr<Impl> impl_interp;
 };
 } // namespace Teakra

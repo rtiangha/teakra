@@ -137,17 +137,22 @@ public:
         teakra.Reset();
 
         Dsp1 dsp(buffer);
-        auto& dsp_memory = teakra.GetDspMemory();
-        u8* program = dsp_memory.data();
-        u8* data = dsp_memory.data() + DspDataOffset;
-        for (const auto& segment : dsp.segments) {
-            if (segment.memory_type == SegmentType::ProgramA ||
-                segment.memory_type == SegmentType::ProgramB) {
-                std::memcpy(program + segment.target * 2, segment.data.data(), segment.data.size());
-            } else if (segment.memory_type == SegmentType::Data) {
-                std::memcpy(data + segment.target * 2, segment.data.data(), segment.data.size());
+
+        const auto load_firmware = [&dsp](auto& dsp_memory) {
+            u8* program = dsp_memory.data();
+            u8* data = dsp_memory.data() + DspDataOffset;
+            for (const auto& segment : dsp.segments) {
+                if (segment.memory_type == SegmentType::ProgramA ||
+                    segment.memory_type == SegmentType::ProgramB) {
+                    std::memcpy(program + segment.target * 2, segment.data.data(), segment.data.size());
+                } else if (segment.memory_type == SegmentType::Data) {
+                    std::memcpy(data + segment.target * 2, segment.data.data(), segment.data.size());
+                }
             }
-        }
+        };
+
+        load_firmware(teakra.GetDspMemory());
+        load_firmware(teakra.GetInterpDspMemory());
 
         // TODO: load special segment
         //core_timing.ScheduleEvent(TeakraSlice, teakra_slice_event, 0);
@@ -203,6 +208,11 @@ public:
         return &memory[DspDataOffset + baddr];
     }
 
+    u8* GetInterpDspDataPointer(u32 baddr) {
+        auto& memory = teakra.GetInterpDspMemory();
+        return &memory[DspDataOffset + baddr];
+    }
+
     const u8* GetDspDataPointer(u32 baddr) const {
         auto& memory = teakra.GetDspMemory();
         return &memory[DspDataOffset + baddr];
@@ -227,6 +237,14 @@ public:
         } else {
             std::memcpy(status_address + 6, &pipe_status.write_bptr, sizeof(u16));
         }
+
+        status_address =
+            GetInterpDspDataPointer(pipe_base_waddr * 2 + slot_index * sizeof(PipeStatus));
+        if (slot_index % 2 == 0) {
+            std::memcpy(status_address + 4, &pipe_status.read_bptr, sizeof(u16));
+        } else {
+            std::memcpy(status_address + 6, &pipe_status.write_bptr, sizeof(u16));
+        }
     }
 
     void WritePipe(u8 pipe_index, std::span<const u8> data) {
@@ -244,6 +262,8 @@ public:
             u16 write_bbegin = pipe_status.write_bptr & PipeStatus::PtrMask;
             assert(write_bend > write_bbegin);
             u16 write_bsize = std::min<u16>(bsize, write_bend - write_bbegin);
+            std::memcpy(GetInterpDspDataPointer(pipe_status.waddress * 2 + write_bbegin), buffer_ptr,
+                        write_bsize);
             std::memcpy(GetDspDataPointer(pipe_status.waddress * 2 + write_bbegin), buffer_ptr,
                         write_bsize);
             buffer_ptr += write_bsize;
@@ -280,8 +300,12 @@ public:
             u16 read_bbegin = pipe_status.read_bptr & PipeStatus::PtrMask;
             assert(read_bend > read_bbegin);
             u16 read_bsize = std::min<u16>(bsize, read_bend - read_bbegin);
+            std::vector<u8> tmp(bsize);
+            std::memcpy(tmp.data(), GetInterpDspDataPointer(pipe_status.waddress * 2 + read_bbegin),
+                        read_bsize);
             std::memcpy(buffer_ptr, GetDspDataPointer(pipe_status.waddress * 2 + read_bbegin),
                         read_bsize);
+            assert(std::memcmp(buffer_ptr, tmp.data(), read_bsize) == 0);
             buffer_ptr += read_bsize;
             pipe_status.read_bptr += read_bsize;
             bsize -= read_bsize;
