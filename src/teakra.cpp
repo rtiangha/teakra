@@ -106,12 +106,11 @@ bool Teakra::RecvDataIsReady(std::uint8_t index) const {
     return impl->apbp_from_dsp.IsDataReady(index);
 }
 std::uint16_t Teakra::RecvData(std::uint8_t index) {
-    [[maybe_unused]]const u16 i = impl_interp->apbp_from_dsp.RecvData(index);
     const u16 j = impl->apbp_from_dsp.RecvData(index);
+    printf("RecvData = %d\n", j);
     return j;
 }
 std::uint16_t Teakra::PeekRecvData(std::uint8_t index) {
-    impl_interp->apbp_from_dsp.PeekData(index);
     return impl->apbp_from_dsp.PeekData(index);
 }
 void Teakra::SetRecvDataHandler(std::uint8_t index, std::function<void()> handler) {

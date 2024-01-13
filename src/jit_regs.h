@@ -95,6 +95,11 @@ union Mod0 {
     BitField<9, 1, u16> ou1;
     BitField<10, 2, u16> ps0; // 2-bit, product shift mode
     BitField<13, 2, u16> ps1;
+
+    static u16 Mask() {
+        return decltype(sat)::mask | decltype(sata)::mask | decltype(mod0_unk_const)::mask
+               | decltype(hwm)::mask | decltype(s)::mask | decltype(ou0)::mask | decltype(ou1)::mask | decltype(ps0)::mask | decltype(ps1)::mask;
+    }
 };
 
 union Mod1 {
@@ -109,6 +114,11 @@ union Mod1 {
     BitField<13, 1, u16> cmd; // 1-bit, step/mod method. 0 - Teak; 1 - TeakLite
     BitField<14, 1, u16> epi; // 1-bit. If set, cause r3 = 0 when steping r3
     BitField<15, 1, u16> epj; // 1-bit. If set, cause r7 = 0 when steping r7
+
+    static u16 Mask() {
+        return decltype(page)::mask | decltype(stp16)::mask | decltype(cmd)::mask
+               | decltype(epi)::mask | decltype(epj)::mask;
+    }
 };
 
 union Mod2 {
@@ -202,6 +212,12 @@ union Stt0 {
     BitField<7, 1, u16> fz; // zero flag
     BitField<11, 1, u16> fc1; // another carry flag
     BitField<2, 6, u16> st0_flags;
+
+    static u16 Mask() {
+        return decltype(flm)::mask | decltype(fvl)::mask | decltype(fe)::mask
+               | decltype(fc0)::mask | decltype(fv)::mask | decltype(fn)::mask
+               | decltype(fm)::mask | decltype(fz)::mask | decltype(fc1)::mask;
+    }
 };
 
 union Stt1 {
@@ -293,10 +309,12 @@ struct JitRegisters {
     JitRegisters() {
         mod0b.sata.Assign(0);
         mod1b.cmd.Assign(0);
-        arp[0].arpoffseti.Assign(0);
-        arp[1].arpoffseti.Assign(1);
-        arp[2].arpoffseti.Assign(2);
-        arp[3].arpoffseti.Assign(0);
+        ar[0].raw = 0x102c;
+        ar[1].raw = 0x5aa3;
+        arp[0].raw = 0x21;
+        arp[1].raw = 0x258c;
+        arp[2].raw = 0x4ab5;
+        arp[3].raw = 0x6c63;
     }
     void Reset() {
         *this = JitRegisters();
@@ -506,6 +524,7 @@ struct JitRegisters {
     void GetStt0(Xbyak::CodeGenerator& c, Xbyak::Reg16 out) {
         c.mov(out, FLAGS);
         c.shr(out, 1); // Flags is the same as Stt0 but has fz in bit0, shift it out.
+        c.and_(out, Stt0::Mask());
     }
 
     template <typename T>
@@ -637,7 +656,36 @@ struct JitRegisters {
     template <typename T>
     void SetSt0(Xbyak::CodeGenerator& c, T value, Mod0& mod0_const) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
-            UNREACHABLE();
+            // Set sat in mod0
+            c.and_(byte[REGS + offsetof(JitRegisters, mod0)], ~decltype(Mod0::sat)::mask);
+            c.bt(value, decltype(St0::sat)::position);
+            c.setc(sil);
+            c.or_(word[REGS + offsetof(JitRegisters, mod0)], sil);
+
+            // Set ie, im0, im1
+            c.bt(value, decltype(St0::ie)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, ie)]);
+            c.bt(value, decltype(St0::im0)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, im)]);
+            c.bt(value, decltype(St0::im1)::position);
+            c.setc(byte[REGS + offsetof(JitRegisters, im) + sizeof(u16)]);
+
+            // Update flags.
+            c.and_(FLAGS, ~decltype(Flags::st0_flags)::mask);
+            c.rorx(rsi, value, decltype(St0::fr)::position);
+            c.and_(rsi, 0x3);
+            c.or_(FLAGS.cvt8(), sil);
+            c.rorx(rsi, value, decltype(St0::flm_fvl)::position);
+            c.shl(rsi, 2);
+            c.and_(rsi, 0x1fc);
+            c.or_(FLAGS.cvt16(), si);
+
+            // Replace upper word of a[0] with sign extended a0e.
+            c.and_(value, decltype(St0::a0e_alias)::mask);
+            c.shl(value, 64 - decltype(St0::a0e_alias)::position - decltype(St0::a0e_alias)::bits);
+            c.sar(value, 64 - decltype(St0::a0e_alias)::bits);
+            c.mov(value.cvt32(), A[0].cvt32());
+            c.mov(A[0], value);
         } else {
             const St0 reg{.raw = value};
 
@@ -661,25 +709,18 @@ struct JitRegisters {
         }
     }
 
-    void GetSt1(Xbyak::CodeGenerator& c, Xbyak::Reg32 scratch, Xbyak::Reg16 out) {
-        // Load mod1 and mod0 in a single 32-bit load.
-        static_assert(offsetof(JitRegisters, mod0) - offsetof(JitRegisters, mod1) == sizeof(u16));
-        c.mov(scratch, dword[REGS + offsetof(JitRegisters, mod1)]);
-
+    void GetSt1(Xbyak::CodeGenerator& c, Xbyak::Reg16 out, Mod0& mod0_const, Mod1& mod1_const) {
         // Copy lowest byte to out, which is page
         c.xor_(out, out);
-        c.mov(out.cvt8(), scratch.cvt8());
+        c.mov(out.cvt8(), mod1_const.page.Value());
 
         // Extract ps0 and place it in out.
-        c.shr(scratch, 16); // ps0 is now in bit 10
-        c.and_(scratch.cvt16(), 0xC00);
-        c.or_(out.cvt16(), scratch.cvt16());
+        c.or_(out.cvt16(), mod0_const.ps0.Value() << decltype(St1::ps0_alias)::position);
 
         // Load a1e and place it in out.
-        c.mov(scratch.cvt64(), A[1]);
-        c.shr(scratch.cvt64(), 32);
-        c.shl(scratch.cvt16(), 12);
-        c.or_(out.cvt16(), scratch.cvt16()); // out |= (a1e << 12)
+        c.rorx(rsi, A[1], 32);
+        c.shl(rsi, decltype(St1::a1e_alias)::position);
+        c.or_(out.cvt16(), si);
     }
 
     template <typename T>

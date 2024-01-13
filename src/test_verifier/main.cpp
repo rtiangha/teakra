@@ -41,6 +41,14 @@ int main(int argc, char** argv) {
     Teakra::JitRegisters jregs;
     Teakra::EmitX64 jit(core_timing, jregs, memory_interface);
 
+    regs.Reset();
+    printf("ar0 = 0x%x\n", regs.Get<Teakra::ar0>());
+    printf("ar1 = 0x%x\n", regs.Get<Teakra::ar1>());
+    printf("arp0 = 0x%x\n", regs.Get<Teakra::arp0>());
+    printf("arp1 = 0x%x\n", regs.Get<Teakra::arp1>());
+    printf("arp2 = 0x%x\n", regs.Get<Teakra::arp2>());
+    printf("arp3 = 0x%x\n", regs.Get<Teakra::arp3>());
+
     int i = 0;
     int passed = 0;
     int total = 0;
@@ -50,7 +58,7 @@ int main(int argc, char** argv) {
         if (std::fread(&test_case, sizeof(test_case), 1, file.get()) == 0) {
             break;
         }
-        regs.Reset();
+        regs.Reset();        
         regs.a = test_case.before.a;
         regs.b = test_case.before.b;
         regs.p = test_case.before.p;
@@ -107,6 +115,7 @@ int main(int argc, char** argv) {
             jregs.bcn = 0;
         }
         jregs.mod0.raw = test_case.before.mod0;
+        jregs.mod0.mod0_unk_const.Assign(1);
         jregs.mod1.raw = test_case.before.mod1;
         jregs.mod2.raw = test_case.before.mod2;
         jregs.ar[0].raw = test_case.before.ar[0];
@@ -131,7 +140,11 @@ int main(int argc, char** argv) {
                 i++;
                 continue;
             }
-            if (i == 63764) {
+            if (i == 81947) {
+                const u16 imod0 = regs.Get<Teakra::mod0>();
+                const u16 mask = Teakra::Mod0::Mask();
+                const u16 jmod0 = jregs.mod0.raw & mask;
+                ASSERT(imod0 == jmod0);
                 printf("bad\n");
             }
             //interpreter.Run(1);

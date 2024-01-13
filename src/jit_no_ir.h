@@ -27,6 +27,8 @@ namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
 
+#define NOT_IMPLEMENTED() unimplemented = true
+
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
     s64 cycles_to_run;
@@ -321,7 +323,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         if (regs.cpc == 1) {
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         } else {
             StoreToMemory(sp, l);
             c.sub(sp, 1);
@@ -348,7 +350,7 @@ public:
         const Reg64 pc = rcx;
         c.xor_(pc, pc);
         if (regs.cpc == 1) {
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         } else {
             LoadFromMemory(pc, sp);
             c.add(sp, 1);
@@ -400,25 +402,25 @@ public:
 
     void undefined(u16 opcode) {
         std::printf("Undefined opcode: 0x%x\n", opcode);
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void ContextStore() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void ContextRestore() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void norm(Ax a, Rn b, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void swap(SwapType swap) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void trap() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     static u16 MemDataReadThunk(void* mem_ptr, u16 address) {
@@ -552,7 +554,7 @@ public:
             break;
         }
         case AlmOp::Msu: {
-            unimplemented = true;
+            NOT_IMPLEMENTED();
             GetAcc(value, b.GetName());
             const Reg64 product = rcx;
             ProductToBus40(product, Px{0});
@@ -589,7 +591,7 @@ public:
         }
 
         default:
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         }
     }
 
@@ -646,7 +648,7 @@ public:
                 AlmOp::Or, AlmOp::And, AlmOp::Xor, AlmOp::Add, AlmOp::Cmp, AlmOp::Sub,
             };
             if (allowed_instruction.count(op.GetName()) == 0)
-                unimplemented = true; // weird effect. probably undefined
+                NOT_IMPLEMENTED(); // weird effect. probably undefined
         };
         switch (a.GetName()) {
         // need more test
@@ -667,7 +669,7 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alm_r6(Alm op, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void alu(Alu op, MemImm16 a, Ax b) {
@@ -677,7 +679,7 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void alu(Alu op, Imm16 a, Ax b) {
         u16 value = a.Unsigned16();
@@ -707,7 +709,12 @@ public:
         }
     }
     void alu(Alu op, MemR7Imm7s a, Ax b) {
-        unimplemented = true;
+        RegToBus16(RegName::r7, rax);
+        c.add(eax, a.Signed16());
+        const Reg64 value = rbx;
+        LoadFromMemory(value, rax);
+        ExtendOperandForAlm(op.GetName(), value);
+        AlmGeneric(op.GetName(), value, b);
     }
 
     void or_(Ab a, Ax b, Ax c) {
@@ -723,7 +730,7 @@ public:
         SetAccAndFlag(c.GetName(), value);
     }
     void or_(Bx a, Bx b, Ax c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     u16 GenericAlbConst(Alb op, u16 a, u16 b) {
@@ -828,9 +835,7 @@ public:
             break;
         }
         case AlbOp::Chng: {
-            EmitPrint(b.cvt64(), "JIT Chng before b = 0x%lx\n");
             c.xor_(b.cvt32(), a);
-            EmitPrint(b.cvt64(), "JIT Chng after b = 0x%lx\n");
             c.mov(result, b);
             c.shr(b, 15);
             c.shl(b, decltype(Flags::fm)::position);
@@ -939,15 +944,11 @@ public:
     void alb(Alb op, Imm16 a, Rn b, StepZIDS bs) {
         const Reg64 address = rbx;
         RnAddressAndModify(b.Index(), bs.GetName(), address);
-        EmitPrint(address, "alb address = 0x%lx\n");
         const Reg64 bv = rax;
         LoadFromMemory(bv, address);
-        EmitPrint(bv, "alb bv = 0x%lx\n");
         const Reg64 result = rcx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
-        EmitPrint(result, "alb result = 0x%lx\n");
         if (IsAlbModifying(op)) {
-            EmitPrint(address, "alb store address = 0x%lx\n");
             StoreToMemory(address, result);
         }
     }
@@ -957,7 +958,7 @@ public:
             ProductToBus40(bv, Px{0});
             c.shr(bv, 16);
         } else if (b.GetName() == RegName::a0 || b.GetName() == RegName::a1) {
-            unimplemented = true; // weird effect;
+            NOT_IMPLEMENTED(); // weird effect;
         } else {
             RegToBus16(b.GetName(), bv);
         }
@@ -967,7 +968,7 @@ public:
             switch (b.GetName()) {
             case RegName::a0:
             case RegName::a1:
-                unimplemented = true;
+                NOT_IMPLEMENTED();
             // operation on accumulators doesn't go through regular bus with flag and saturation
             case RegName::a0l:
                 c.mov(A[0].cvt16(), result.cvt16());
@@ -1015,7 +1016,7 @@ public:
         }
     }
     void alb_r6(Alb op, Imm16 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void alb(Alb op, Imm16 a, SttMod b) {
         if (IsAlbConst(b)) {
@@ -1049,7 +1050,13 @@ public:
     }
 
     void add(Ab a, Bx b) {
-        unimplemented = true;
+        const Reg64 value_a = rax;
+        const Reg64 value_b = rbx;
+        GetAcc(value_a, a.GetName());
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, false);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add(Bx a, Ax b) {
         const Reg64 value_a = rax;
@@ -1061,7 +1068,7 @@ public:
         SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add_p1(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void add(Px a, Bx b) {
         const Reg64 value_a = rax;
@@ -1092,45 +1099,45 @@ public:
         SatAndSetAccAndFlag(b.GetName(), result);
     }
     void sub_p1(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub(Px a, Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void app(Ab c, SumBase base, bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void add_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void add_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub_sub(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void add_sub_sv(ArRn1 a, ArStep1 as, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub_add_sv(ArRn1 a, ArStep1 as, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub_add_i_mov_j_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void sub_add_j_mov_i_sv(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void add_sub_i_mov_j(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void add_sub_j_mov_i(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     template <typename T>
@@ -1157,7 +1164,7 @@ public:
                 c.movsxd(value, value.cvt32());
                 return;
             }
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         }
         c.shl(value, BitSize<T>() - bit_count);
         c.sar(value, BitSize<T>() - bit_count);
@@ -1167,11 +1174,9 @@ public:
         c.xor_(rcx, rcx);
         c.mov(rbx, 0xFF'FFFF'FFFF);
         c.and_(value, rbx);
-        EmitPrint(value, "ShiftBus40: value = 0x%lx\n");
         const Reg64 original_sign = rbx;
         c.mov(original_sign, value);
         c.shr(original_sign, 39);
-        EmitPrint(original_sign, "ShiftBus40: original_sign = 0x%lx\n");
         if ((sv >> 15) == 0) {
             // left shift
             if (sv >= 40) {
@@ -1225,7 +1230,7 @@ public:
             u16 nsv = ~sv + 1;
             if (nsv >= 40) {
                 if (blk_key.curr.mod0.s == 0) {
-                    unimplemented = true;
+                    NOT_IMPLEMENTED();
                     // regs.fc0 = (value >> 39) & 1;
                     // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
                 } else {
@@ -1261,7 +1266,6 @@ public:
             c.cmp(rcx, value);
             c.je(end_label);
             c.L(saturate_label);
-            EmitPrint(value, "ShiftBus40: Doing saturate on value = 0x%lx\n");
             c.or_(FLAGS, decltype(Flags::flm)::mask);
             c.mov(value, 0x7FFF'FFFF);
             c.mov(rcx, 0xFFFF'FFFF'8000'0000);
@@ -1424,7 +1428,7 @@ public:
                 u64 result = AddSub(value, 0x8000, false);
                 SatAndSetAccAndFlag(a, result);
                 break;*/
-                unimplemented = true;
+                NOT_IMPLEMENTED();
             }
             case ModaOp::Clrr: {
                 SatAndSetAccAndFlag(a, 0x8000ULL);
@@ -1465,14 +1469,14 @@ public:
     }
 
     void pacr1(Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void clr(Ab a, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void clrr(Ab a, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void BlockRepeat(Reg64 lc, u32 address) {
@@ -1508,7 +1512,7 @@ public:
         BlockRepeat(lc, address);
     }
     void bkrep_r6(Address18_16 addr_low, Address18_2 addr_high) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     static void DoBkrepStackCopyThunk(JitRegisters* regs) {
@@ -1597,7 +1601,7 @@ public:
     }
 
     void bkreprst(ArRn2 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bkreprst_memsp() {
         const Reg64 sp = rbx;
@@ -1606,7 +1610,7 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void bkrepsto(ArRn2 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bkrepsto_memsp() {
         const Reg64 sp = rbx;
@@ -1654,26 +1658,26 @@ public:
         }
     }
     void bankr() {
-         unimplemented = true;
+         NOT_IMPLEMENTED();
     }
     void bankr(Ar a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bankr(Ar a, Arp b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bankr(Arp a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void bitrev(Rn a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bitrev_dbrv(Rn a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void bitrev_ebrv(Rn a) {
-         unimplemented = true;
+         NOT_IMPLEMENTED();
     }
 
     void br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
@@ -1698,7 +1702,7 @@ public:
     }
 
     void break_() {
-         unimplemented = true;
+         NOT_IMPLEMENTED();
     }
 
     void call(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
@@ -1710,7 +1714,7 @@ public:
          compiling = false;
     }
     void calla(Axl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void calla(Ax a) {
         EmitPushPC();
@@ -1721,7 +1725,13 @@ public:
         compiling = false;
     }
     void callr(RelAddr7 addr, Cond cond) {
-        unimplemented = true;
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        ConditionPass(cond, [&] {
+            EmitPushPC();
+            regs.pc += addr.Relative32();
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        });
+        compiling = false;
     }
 
     void cntx_s() {
@@ -1780,7 +1790,7 @@ public:
         compiling = false;
     }
     void retd() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void reti(Cond cond) {
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
@@ -1799,10 +1809,10 @@ public:
         compiling = false;
     }
     void retid() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void retidc() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void rets(Imm8 a) {
         EmitPopPC();
@@ -1934,7 +1944,7 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
     }
     void push_prpage() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void push(Px a) {
         const Reg64 value = rbx;
@@ -2049,10 +2059,10 @@ public:
         RegFromBus16(a.GetName(), value);
     }
     void pop(Bx a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void pop_prpage() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void pop(Px a) {
         const Reg64 sp = rbx;
@@ -2146,13 +2156,15 @@ public:
         }
     }
     void rep(Register a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void rep_r6() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void shfc(Ab a, Ab b, Cond cond) {
+        NOT_IMPLEMENTED();
+        return;
         ConditionPass(cond, [&] {
             const Reg64 value = rax;
             GetAcc(value, a.GetName());
@@ -2167,13 +2179,19 @@ public:
     }
 
     void tst4b(ArRn2 b, ArStep2 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void tst4b(ArRn2 b, ArStep2 bs, Ax c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void tstb(MemImm8 a, Imm4 b) {
-        unimplemented = true;
+        const Reg64 value = rbx;
+        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        c.xor_(rax, rax);
+        c.and_(FLAGS, ~decltype(Flags::fz)::mask);
+        c.bt(value, b.Unsigned16());
+        c.setc(ah);
+        c.or_(FLAGS, eax);
     }
     void tstb(Rn a, StepZIDS as, Imm4 b) {
         const Reg64 address = rax;
@@ -2198,14 +2216,19 @@ public:
         c.or_(FLAGS, mask);
     }
     void tstb_r6(Imm4 b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void tstb(SttMod a, Imm16 b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void and_(Ab a, Ab b, Ax c) {
-        unimplemented = true;
+        const Reg64 value = rax;
+        GetAcc(value, a.GetName());
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        this->c.and_(value, value_b);
+        SetAccAndFlag(c.GetName(), value);
     }
 
     void dint() {
@@ -2215,23 +2238,64 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
     }
 
+    void MulGeneric(MulOp op, Ax a) {
+        if (op != MulOp::Mpy && op != MulOp::Mpysu) {
+            const Reg64 value = rax;
+            GetAcc(value, a.GetName());
+            const Reg64 product = rbx;
+            ProductToBus40(product, Px{0});
+            if (op == MulOp::Maa || op == MulOp::Maasu) {
+                c.shr(product, 16);
+                SignExtend(product, 24);
+            }
+            const Reg64 result = rcx;
+            AddSub(value, product, result, false);
+            SatAndSetAccAndFlag(a.GetName(), result);
+        }
+
+        switch (op) {
+        case MulOp::Mpy:
+        case MulOp::Mac:
+        case MulOp::Maa:
+            DoMultiplication(0, eax, ebx, true, true);
+            break;
+        case MulOp::Mpysu:
+        case MulOp::Macsu:
+        case MulOp::Maasu:
+            // Note: the naming conventin of "mpysu" is "multiply signed *y* by unsigned *x*"
+            DoMultiplication(0, eax, ebx, false, true);
+            break;
+        case MulOp::Macus:
+            DoMultiplication(0, eax, ebx, true, false);
+            break;
+        case MulOp::Macuu:
+            DoMultiplication(0, eax, ebx, false, false);
+            break;
+        }
+    }
+
     void mul(Mul3 op, Rn y, StepZIDS ys, Imm16 x, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mul_y0(Mul3 op, Rn x, StepZIDS xs, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mul_y0(Mul3 op, Register x, Ax a) {
-        unimplemented = true;
+        const Reg64 x0 = rax;
+        RegToBus16(x.GetName(), x0);
+        c.rorx(FACTORS, FACTORS, 32);
+        c.mov(FACTORS.cvt16(), x0.cvt16());
+        c.rorx(FACTORS, FACTORS, 32);
+        MulGeneric(op.GetName(), a);
     }
     void mul(Mul3 op, R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mul_y0_r6(Mul3 op, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mul_y0(Mul2 op, MemImm8 x, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mpyi(Imm8s x) {
@@ -2242,19 +2306,19 @@ public:
     }
 
     void msu(R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void msu(Rn y, StepZIDS ys, Imm16 x, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void msusu(ArRn2 x, ArStep2 xs, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mac_x1to0(Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mac1(ArpRn1 xy, ArpStep1 xis, ArpStep1 yjs, Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void modr(Rn a, StepZIDS as) {
@@ -2268,7 +2332,7 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_dmod(Rn a, StepZIDS as) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_i2(Rn a) {
         u32 unit = a.Index();
@@ -2281,7 +2345,7 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_i2_dmod(Rn a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_d2(Rn a) {
         u32 unit = a.Index();
@@ -2294,19 +2358,19 @@ public:
         c.or_(FLAGS.cvt8(), reg.cvt8());
     }
     void modr_d2_dmod(Rn a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_eemod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_edmod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_demod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void modr_ddmod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void ProgramRead(Reg64 out, Reg64 address) {
@@ -2315,10 +2379,10 @@ public:
     }
 
     void movd(R0123 a, StepZIDS as, R45 b, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movp(Axl a, Register b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movp(Ax a, Register b) {
         const Reg64 address = rax;
@@ -2329,26 +2393,26 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void movp(Rn a, StepZIDS as, R0123 b, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movpdw(Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov(Ab a, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_dvm(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_x0(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_x1(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_y1(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     static void MemDataWriteThunk(void* mem_ptr, u16 address, u16 data) {
@@ -2381,7 +2445,7 @@ public:
         StoreToMemory(b.Unsigned16(), value16);
     }
     void mov(Axl a, MemR7Imm16 b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Axl a, MemR7Imm7s b) {
         const Reg64 value16 = rbx;
@@ -2408,7 +2472,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_eu(MemImm8 a, Axh b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(MemImm8 a, RnOld b) {
         const Reg64 value = rax;
@@ -2423,10 +2487,10 @@ public:
         compiling = false; // Static state changed, end block
     }
     void mov_dvm_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_icr_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Imm16 a, Bx b) {
         u16 value = a.Unsigned16();
@@ -2437,10 +2501,10 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_icr(Imm5 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Imm8s a, Axh b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Imm8s a, RnOld b) {
         u16 value = a.Signed16();
@@ -2456,7 +2520,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm16 a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(MemR7Imm7s a, Ax b) {
         const Reg64 address = rax;
@@ -2481,7 +2545,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_memsp_to(Register b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_mixp_to(Register b) {
         const Reg64 value = rax;
@@ -2494,7 +2558,7 @@ public:
         StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), value);
     }
     void mov_icr(Register a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_mixp(Register a) {
         const Reg64 value = rax;
@@ -2544,19 +2608,19 @@ public:
         }
     }
     void mov_repc_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_sv_to(MemImm8 b) {
         StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), blk_key.sv);
     }
     void mov_x0_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_x1_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_y1_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Imm16 a, ArArp b) {
         u16 value = a.Unsigned16();
@@ -2572,7 +2636,7 @@ public:
     }
 
     void mov_repc(Imm16 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_stepi0(Imm16 a) {
         u16 value = a.Unsigned16();
@@ -2589,7 +2653,7 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov_prpage(Imm4 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_a0h_stepi0() {
@@ -2614,10 +2678,10 @@ public:
     }
 
     void mov_prpage(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_repc(Abl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(Abl a, ArArp b) {
         const Reg64 value = rax;
@@ -2631,10 +2695,10 @@ public:
     }
 
     void mov_prpage_to(Abl b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_repc_to(Abl b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(ArArp a, Abl b) {
         const Reg64 value = rax;
@@ -2648,37 +2712,37 @@ public:
     }
 
     void mov_repc_to(ArRn1 b, ArStep1 bs) {
-         unimplemented = true;
+         NOT_IMPLEMENTED();
     }
     void mov(ArArp a, ArRn1 b, ArStep1 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(SttMod a, ArRn1 b, ArStep1 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_repc(ArRn1 a, ArStep1 as) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(ArRn1 a, ArStep1 as, ArArp b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(ArRn1 a, ArStep1 as, SttMod b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_repc_to(MemR7Imm16 b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(ArArpSttMod a, MemR7Imm16 b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_repc(MemR7Imm16 a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov(MemR7Imm16 a, ArArpSttMod b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_pc(Ax a) {
@@ -2686,29 +2750,29 @@ public:
         compiling = false;
     }
     void mov_pc(Bx a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_mixp_to(Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_mixp_r6() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_p0h_to(Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_p0h_r6() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_p0h_to(Register b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_p0(Ab a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_p1_to(Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov2(Px a, ArRn2 b, ArStep2 bs) {
@@ -2726,19 +2790,19 @@ public:
         StoreToMemory(address, value);
     }
     void mov2s(Px a, ArRn2 b, ArStep2 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov2(ArRn2 a, ArStep2 as, Px b) {
         u16 unit = GetArRnUnit(a);
-        const Reg64 address = rbx;
+        const Reg64 address = rax;
         RnAddressAndModify(unit, GetArStep(as), address);
-        const Reg64 address2 = rax;
+        const Reg64 address2 = rbx;
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
         const Reg64 value = rcx;
-        LoadFromMemory(value, address2);
-        c.shl(value, 16);
         LoadFromMemory(value, address);
+        c.shl(value, 16);
+        LoadFromMemory(value, address2);
         ProductFromBus32(b, value.cvt32());
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
@@ -2772,10 +2836,10 @@ public:
     }
 
     void mov_r6_to(Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_r6_mixp() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_r6_to(Register b) {
         const Reg64 value = rax;
@@ -2788,45 +2852,45 @@ public:
         RegFromBus16(RegName::r6, value);
     }
     void mov_memsp_r6() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_r6_to(Rn b, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_r6(Rn a, StepZIDS as) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov2_axh_m_y0_m(Axh a, ArRn2 b, ArStep2 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov2_ax_mij(Ab a, ArpRn1 b, ArpStep1 bsi, ArpStep1 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov2_ax_mji(Ab a, ArpRn1 b, ArpStep1 bsi, ArpStep1 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov2_mij_ax(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov2_mji_ax(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov2_abh_m(Abh ax, Abh ay, ArRn1 b, ArStep1 bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exchange_iaj(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exchange_riaj(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exchange_jai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exchange_rjai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void movs(MemImm8 a, Ab b) {
@@ -2850,7 +2914,7 @@ public:
         ShiftBus40(value, blk_key.sv, b.GetName());
     }
     void movs_r6_to(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movsi(RnOld a, Ab b, Imm5s s) {
         const Reg64 value = rax;
@@ -2861,262 +2925,283 @@ public:
     }
 
     void movr(ArRn2 a, ArStep2 as, Abh b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movr(Rn a, StepZIDS as, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movr(Register a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movr(Bx a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void movr_r6_to(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void exp(Bx a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp(Bx a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp(Rn a, StepZIDS as) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp(Rn a, StepZIDS as, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp(Register a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp(Register a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp_r6() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void exp_r6(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void lim(Ax a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void vtrclr0() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrclr1() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrclr() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrmov0(Axl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrmov1(Axl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrmov(Axl a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void vtrshr() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void clrp0() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void clrp1() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void clrp() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void max_ge(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max_gt(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        const Reg64 u = rax;
+        GetAcc(u, a.GetName());
+        const Reg64 v = rbx;
+        GetAcc(v, CounterAcc(a.GetName()));
+        const Reg64 d = rcx;
+        c.mov(d, v);
+        c.sub(d, u);
+        const Reg64 r0 = u;
+        RnAndModify(0, bs.GetName(), r0);
+
+        Xbyak::Label end_label, zero_fm;
+        c.bt(d, 63);
+        c.jc(zero_fm);
+        c.test(d, d);
+        c.jz(zero_fm);
+        c.bts(FLAGS, decltype(Flags::fm)::position);
+        c.mov(word[REGS + offsetof(JitRegisters, mixp)], r0.cvt16());
+        SetAcc(a.GetName(), v);
+        c.jmp(end_label);
+        c.L(zero_fm);
+        c.btr(FLAGS, decltype(Flags::fm)::position);
+        c.L(end_label);
     }
     void min_le(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min_lt(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void max_ge_r0(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max_gt_r0(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min_le_r0(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min_lt_r0(Ax a, StepZIDS bs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void divs(MemImm8 a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void sqr_sqr_add3(Ab a, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void sqr_sqr_add3(ArRn2 a, ArStep2 as, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void sqr_mpysu_add3a(Ab a, Ab b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void cmp(Ax a, Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cmp_b0_b1() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cmp_b1_b0() {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cmp(Bx a, Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cmp_p1_to(Ax b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void max2_vtr(Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr(Ax a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr(Ax a, Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr(Ax a, Bx b) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void max2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void min2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     template <typename ArpStepX>
     void mov_sv_app(ArRn1 a, ArpStepX as, Bx b, SumBase base, bool sub_p0, bool p0_align,
                     bool sub_p1, bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void cbs(Axh a, CbsCond c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cbs(Axh a, Bxh b, CbsCond c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void cbs(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, CbsCond c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
              bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     template <typename ArpRnX, typename ArpStepX>
     void mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
              bool sub_p1, bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma_mx_xy(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma_xy_mx(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma_mov(Axh u, Bxh v, ArRn1 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign,
                  bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                  bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mma_mov(ArRn2 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                  bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                  bool p1_align) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void addhp(ArRn2 a, ArStep2 as, Px b, Ax c) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
     void mov_ext0(Imm8s a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_ext1(Imm8s a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_ext2(Imm8s a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
     void mov_ext3(Imm8s a) {
-        unimplemented = true;
+        NOT_IMPLEMENTED();
     }
 
 private:
@@ -3232,7 +3317,7 @@ private:
         case RegName::a1e:
         case RegName::b0e:
         case RegName::b1e:
-            unimplemented = true;
+            NOT_IMPLEMENTED();
 
         case RegName::r0:
             c.movzx(out, R0_1_2_3.cvt16());
@@ -3289,6 +3374,9 @@ private:
         case RegName::st0:
             regs.GetSt0(c, out.cvt16(), blk_key.curr.mod0);
             break;
+        case RegName::st1:
+            regs.GetSt1(c, out.cvt16(), blk_key.curr.mod0, blk_key.curr.mod1);
+            break;
 
         case RegName::cfgi:
             c.mov(out, blk_key.curr.cfgi.raw);
@@ -3298,10 +3386,10 @@ private:
             break;
 
         case RegName::mod0:
-            c.mov(out, blk_key.curr.mod0.raw);
+            c.mov(out, blk_key.curr.mod0.raw & Mod0::Mask());
             break;
         case RegName::mod1:
-            c.mov(out, blk_key.curr.mod1.raw);
+            c.mov(out, blk_key.curr.mod1.raw & Mod1::Mask());
             break;
         case RegName::mod2:
             c.mov(out, blk_key.curr.mod2.raw);
@@ -3361,7 +3449,7 @@ private:
             c.mov(out, B[1]);
             break;
         default:
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         }
     }
 
@@ -3492,6 +3580,12 @@ private:
             compiling = false; // Static state changed, end block
             break;
 
+        case RegName::st0:
+            regs.SetSt0(c, value, blk_key.curr.mod0);
+            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            compiling = false; // Static state changed, end block
+            break;
+
         case RegName::stt0:
             regs.SetStt0(c, value);
             break;
@@ -3581,7 +3675,7 @@ private:
         case RegName::a1e:
         case RegName::b0e:
         case RegName::b1e:
-            unimplemented = true;
+            NOT_IMPLEMENTED();
 
         case RegName::r0:
             c.mov(R0_1_2_3.cvt16(), value);
@@ -3690,7 +3784,7 @@ private:
 
         default:
             //UNREACHABLE();
-            unimplemented = true;
+            NOT_IMPLEMENTED();
         }
     }
 
@@ -3910,7 +4004,7 @@ private:
                 c.add(address, 1);
                 return;
             }
-            unimplemented = true;
+            NOT_IMPLEMENTED();
             //if ((address & mask) == mod)
             //    return address & ~mask;
             //return address + 1;
@@ -3919,7 +4013,7 @@ private:
                 c.sub(address, 1);
                 return;
             }
-            unimplemented = true;
+            NOT_IMPLEMENTED();
             // TODO: sometimes this would return two addresses,
             // neither of which is the original Rn value.
             // This only happens for memory writing, but not for memory reading.
@@ -4378,6 +4472,20 @@ private:
         c.mov(dword[REGS + offsetof(JitRegisters, p) + unit * sizeof(u32)], value);
         c.bt(value, 31);
         c.setc(word[REGS + offsetof(JitRegisters, pe) + unit * sizeof(u16)]);
+    }
+
+    static RegName CounterAcc(RegName in) {
+        static std::unordered_map<RegName, RegName> map{
+                                                        {RegName::a0, RegName::a1},   {RegName::a1, RegName::a0},
+                                                        {RegName::b0, RegName::b1},   {RegName::b1, RegName::b0},
+                                                        {RegName::a0l, RegName::a1l}, {RegName::a1l, RegName::a0l},
+                                                        {RegName::b0l, RegName::b1l}, {RegName::b1l, RegName::b0l},
+                                                        {RegName::a0h, RegName::a1h}, {RegName::a1h, RegName::a0h},
+                                                        {RegName::b0h, RegName::b1h}, {RegName::b1h, RegName::b0h},
+                                                        {RegName::a0e, RegName::a1e}, {RegName::a1e, RegName::a0e},
+                                                        {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
+                                                        };
+        return map.at(in);
     }
 
     bool CompareRegisterState() {
