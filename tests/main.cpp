@@ -48,7 +48,8 @@ void SourceStatus() {
     fillBuffer(audio_buffer3, NUM_SAMPLES, 40);
 
     state.waitForSync();
-    state.initSharedMem();
+    state.initSharedMem(true);
+    state.initSharedMem(false);
     state.notifyDsp();
     state.waitForSync();
     state.notifyDsp();
@@ -311,6 +312,6 @@ void InterpLinear() {
 }
 
 int main() {
-    SourceStatus();
+    InterpLinear();
     return 0;
 }

@@ -136,15 +136,11 @@ int main(int argc, char** argv) {
         bool pass = true;
         bool skip = false;
         try {
-            if (i >= 40064 && i <= 45999) {
+            /*if (i >= 40064 && i <= 45999) {
                 i++;
                 continue;
-            }
-            if (i == 81947) {
-                const u16 imod0 = regs.Get<Teakra::mod0>();
-                const u16 mask = Teakra::Mod0::Mask();
-                const u16 jmod0 = jregs.mod0.raw & mask;
-                ASSERT(imod0 == jmod0);
+            }*/
+            if (i == 82648) {
                 printf("bad\n");
             }
             //interpreter.Run(1);

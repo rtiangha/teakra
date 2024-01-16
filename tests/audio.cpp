@@ -125,13 +125,41 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
 
             shared_mem[i].dsp_debug = reinterpret_cast<DSP::HLE::DspDebug*>(dsp_structs[9][i]);
         }
+
+        dsp_structs[0][0][0] = frame_id;
+
+        for (int i = 0; i < 15; i++) {
+            const u32 addr0 = static_cast<u32>(dsp_addrs[i]);
+            const u32 addr1 = static_cast<u32>(dsp_addrs[i]) | 0x10000;
+            dsp_structs[i][0] = reinterpret_cast<u16*>(lle.GetInterpDspDataPointer(addr0 * 2));
+            dsp_structs[i][1] = reinterpret_cast<u16*>(lle.GetInterpDspDataPointer(addr1 * 2));
+        }
+
+        for (int i = 0; i < 2; i++) {
+            shared_mem_interp[i].frame_counter = reinterpret_cast<u16*>(dsp_structs[0][i]);
+
+            shared_mem_interp[i].source_configurations = reinterpret_cast<DSP::HLE::SourceConfiguration*>(dsp_structs[1][i]);
+            shared_mem_interp[i].source_statuses = reinterpret_cast<DSP::HLE::SourceStatus*>(dsp_structs[2][i]);
+            shared_mem_interp[i].adpcm_coefficients = reinterpret_cast<DSP::HLE::AdpcmCoefficients*>(dsp_structs[3][i]);
+
+            shared_mem_interp[i].dsp_configuration = reinterpret_cast<DSP::HLE::DspConfiguration*>(dsp_structs[4][i]);
+            shared_mem_interp[i].dsp_status = reinterpret_cast<DSP::HLE::DspStatus*>(dsp_structs[5][i]);
+
+            shared_mem_interp[i].final_samples = reinterpret_cast<DSP::HLE::FinalMixSamples*>(dsp_structs[6][i]);
+            shared_mem_interp[i].intermediate_mix_samples = reinterpret_cast<DSP::HLE::IntermediateMixSamples*>(dsp_structs[7][i]);
+
+            shared_mem_interp[i].compressor = reinterpret_cast<DSP::HLE::Compressor*>(dsp_structs[8][i]);
+
+            shared_mem_interp[i].dsp_debug = reinterpret_cast<DSP::HLE::DspDebug*>(dsp_structs[9][i]);
+        }
+
+        dsp_structs[0][0][0] = frame_id;
     }
 
     // Poke the DSP again.
     // VERIFY(DSP_SetSemaphore(0x4000));
     lle.SetSemaphore(0x4000);
 
-    dsp_structs[0][0][0] = frame_id;
     frame_id++;
     // VERIFY(svcSignalEvent(dsp_semaphore));
 }
@@ -151,8 +179,8 @@ AudioState::~AudioState() {
     // dspExit();
 }
 
-void AudioState::initSharedMem() {
-    for (auto& config : write().source_configurations->config) {
+void AudioState::initSharedMem(bool is_jit) {
+    for (auto& config : write(is_jit).source_configurations->config) {
         {
             config.enable = 0;
             config.enable_dirty.Assign(1);
@@ -199,36 +227,38 @@ void AudioState::initSharedMem() {
     }
 
     {
-        write().dsp_configuration->volume[0] = 1.0;
-        write().dsp_configuration->volume[1] = 0.0;
-        write().dsp_configuration->volume[2] = 0.0;
-        write().dsp_configuration->volume_0_dirty.Assign(1);
-        write().dsp_configuration->volume_1_dirty.Assign(1);
-        write().dsp_configuration->volume_2_dirty.Assign(1);
+        write(is_jit).dsp_configuration->volume[0] = 1.0;
+        write(is_jit).dsp_configuration->volume[1] = 0.0;
+        write(is_jit).dsp_configuration->volume[2] = 0.0;
+        write(is_jit).dsp_configuration->volume_0_dirty.Assign(1);
+        write(is_jit).dsp_configuration->volume_1_dirty.Assign(1);
+        write(is_jit).dsp_configuration->volume_2_dirty.Assign(1);
     }
 
     {
-        write().dsp_configuration->output_format = DSP::HLE::DspConfiguration::OutputFormat::Stereo;
-        write().dsp_configuration->output_format_dirty.Assign(1);
+        write(is_jit).dsp_configuration->output_format = DSP::HLE::DspConfiguration::OutputFormat::Stereo;
+        write(is_jit).dsp_configuration->output_format_dirty.Assign(1);
     }
 
     {
-        write().dsp_configuration->limiter_enabled = 0;
-        write().dsp_configuration->limiter_enabled_dirty.Assign(1);
+        write(is_jit).dsp_configuration->limiter_enabled = 0;
+        write(is_jit).dsp_configuration->limiter_enabled_dirty.Assign(1);
     }
 
     {
         // https://www.3dbrew.org/wiki/Configuration_Memory
-        write().dsp_configuration->headphones_connected = false;
-        write().dsp_configuration->headphones_connected_dirty.Assign(1);
+        write(is_jit).dsp_configuration->headphones_connected = false;
+        write(is_jit).dsp_configuration->headphones_connected_dirty.Assign(1);
     }
 }
 
-const SharedMem& AudioState::write() const {
-    return shared_mem[frame_id % 2 == 1 ? 1 : 0];
+const SharedMem& AudioState::write(bool is_jit) const {
+    const auto& mem = is_jit ? shared_mem : shared_mem_interp;
+    return mem[frame_id % 2 == 1 ? 1 : 0];
 }
-const SharedMem& AudioState::read() const {
-    return shared_mem[frame_id % 2 == 1 ? 1 : 0];
+const SharedMem& AudioState::read(bool is_jit) const {
+    const auto& mem = is_jit ? shared_mem : shared_mem_interp;
+    return mem[frame_id % 2 == 1 ? 1 : 0];
 }
 
 void AudioState::waitForSync() {
@@ -239,7 +269,8 @@ void AudioState::waitForSync() {
 }
 
 void AudioState::notifyDsp() {
-    write().frame_counter[0] = frame_id;
+    write(true).frame_counter[0] = frame_id;
+    write(false).frame_counter[0] = frame_id;
     frame_id++;
     lle.SetSemaphore(0x2000);
     //svcSignalEvent(dsp_semaphore);

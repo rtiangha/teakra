@@ -32,17 +32,18 @@ struct AudioState {
     explicit AudioState(std::vector<u8>&& dspfirm);
     ~AudioState();
 
-    void initSharedMem();
+    void initSharedMem(bool is_jit = true);
 
     Handle dsp_semaphore = 0;
     DspLle lle;
 
     std::array<std::array<u16*, 2>, 16> dsp_structs;
     std::array<SharedMem, 2> shared_mem;
+    std::array<SharedMem, 2> shared_mem_interp;
     u16 frame_id = 4;
 
-    const SharedMem& read() const;
-    const SharedMem& write() const;
+    const SharedMem& read(bool is_jit = true) const;
+    const SharedMem& write(bool is_jit = true) const;
     void waitForSync();
     void notifyDsp();
 

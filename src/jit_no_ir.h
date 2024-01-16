@@ -27,7 +27,7 @@ namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
 
-#define NOT_IMPLEMENTED() UNREACHABLE()
+#define NOT_IMPLEMENTED() unimplemented = true
 
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
@@ -449,7 +449,88 @@ public:
         NOT_IMPLEMENTED();
     }
     void swap(SwapType swap) {
-        NOT_IMPLEMENTED();
+        RegName s0, d0, s1, d1;
+        const Reg64 u = rax, v = rbx;
+        switch (swap.GetName()) {
+        case SwapTypeValue::a0b0:
+            s0 = d1 = RegName::a0;
+            s1 = d0 = RegName::b0;
+            break;
+        case SwapTypeValue::a0b1:
+            s0 = d1 = RegName::a0;
+            s1 = d0 = RegName::b1;
+            break;
+        case SwapTypeValue::a1b0:
+            s0 = d1 = RegName::a1;
+            s1 = d0 = RegName::b0;
+            break;
+        case SwapTypeValue::a1b1:
+            s0 = d1 = RegName::a1;
+            s1 = d0 = RegName::b1;
+            break;
+        case SwapTypeValue::a0b0a1b1:
+            GetAcc(u, RegName::a1);
+            GetAcc(v, RegName::b1);
+            SatAndSetAccAndFlag(RegName::a1, v);
+            SatAndSetAccAndFlag(RegName::b1, u);
+            s0 = d1 = RegName::a0;
+            s1 = d0 = RegName::b0;
+            break;
+        case SwapTypeValue::a0b1a1b0:
+            GetAcc(u, RegName::a1);
+            GetAcc(v, RegName::b0);
+            SatAndSetAccAndFlag(RegName::a1, v);
+            SatAndSetAccAndFlag(RegName::b0, u);
+            s0 = d1 = RegName::a0;
+            s1 = d0 = RegName::b1;
+            break;
+        case SwapTypeValue::a0b0a1:
+            s0 = RegName::a0;
+            d0 = s1 = RegName::b0;
+            d1 = RegName::a1;
+            break;
+        case SwapTypeValue::a0b1a1:
+            s0 = RegName::a0;
+            d0 = s1 = RegName::b1;
+            d1 = RegName::a1;
+            break;
+        case SwapTypeValue::a1b0a0:
+            s0 = RegName::a1;
+            d0 = s1 = RegName::b0;
+            d1 = RegName::a0;
+            break;
+        case SwapTypeValue::a1b1a0:
+            s0 = RegName::a1;
+            d0 = s1 = RegName::b1;
+            d1 = RegName::a0;
+            break;
+        case SwapTypeValue::b0a0b1:
+            s0 = d1 = RegName::a0;
+            d0 = RegName::b1;
+            s1 = RegName::b0;
+            break;
+        case SwapTypeValue::b0a1b1:
+            s0 = d1 = RegName::a1;
+            d0 = RegName::b1;
+            s1 = RegName::b0;
+            break;
+        case SwapTypeValue::b1a0b0:
+            s0 = d1 = RegName::a0;
+            d0 = RegName::b0;
+            s1 = RegName::b1;
+            break;
+        case SwapTypeValue::b1a1b0:
+            s0 = d1 = RegName::a1;
+            d0 = RegName::b0;
+            s1 = RegName::b1;
+            break;
+        default:
+            UNREACHABLE();
+        }
+        GetAcc(u, s0);
+        GetAcc(v, s1);
+        SatAndSetAccAndFlag(d0, u);
+        SatAndSetAccAndFlag(d1, v); // only this one affects flags (except for fl)
     }
     void trap() {
         NOT_IMPLEMENTED();
@@ -1387,14 +1468,15 @@ public:
                 GetAcc(acc, a);
                 c.mov(rbx, 0xFF'FFFF'FFFF); // Maybe use BZHI?
                 c.and_(acc, rbx);
+                c.xor_(rbx, rbx);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setc(rbx); // u16 old_fc = regs.fc0;
+                c.setc(bl); // u16 old_fc = regs.fc0;
                 c.shl(rbx, 40);
                 c.or_(acc, rbx); // value |= (u64)old_fc << 40;
                 c.bt(acc, 1); // u32 mask = value & 1;
-                c.setc(rbx); // mask <<= fc0_pos;
-                c.shl(rbx, decltype(Flags::fc0)::position);
-                c.or_(FLAGS, rbx); // flags |= mask;
+                c.setc(bl); // mask <<= fc0_pos;
+                c.shl(bl, decltype(Flags::fc0)::position);
+                c.or_(FLAGS.cvt8(), bx); // flags |= mask;
                 c.shr(acc, 1); // value >>= 1;
                 SignExtend(acc, 40);
                 SetAccAndFlag(a, acc);
@@ -1402,14 +1484,15 @@ public:
             }
             case ModaOp::Rol: {
                 GetAcc(acc, a);
+                c.xor_(rbx, rbx);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setc(rbx); // u16 old_fc = regs.fc0;
+                c.setc(bl); // u16 old_fc = regs.fc0;
                 c.shl(acc, 1); // value <<= 1;
                 c.or_(acc, rbx); // value |= old_fc;
                 c.bt(acc, 40);
-                c.setc(rbx);
-                c.shl(rbx, decltype(Flags::fc0)::position);
-                c.or_(FLAGS, rbx); // regs.fc0 = (value >> 40) & 1;
+                c.setc(bl);
+                c.shl(bl, decltype(Flags::fc0)::position);
+                c.or_(FLAGS, bx); // regs.fc0 = (value >> 40) & 1;
                 SignExtend(acc, 40);
                 SetAccAndFlag(a, acc);
                 break;
@@ -2320,7 +2403,14 @@ public:
         NOT_IMPLEMENTED();
     }
     void mul_y0(Mul3 op, Rn x, StepZIDS xs, Ax a) {
-        NOT_IMPLEMENTED();
+        const Reg64 address = rax;
+        RnAddressAndModify(x.Index(), xs.GetName(), address);
+        const Reg64 value = rbx;
+        LoadFromMemory(value, address);
+        c.rorx(FACTORS, FACTORS, 32);
+        c.mov(FACTORS.cvt16(), value.cvt16());
+        c.rorx(FACTORS, FACTORS, 32);
+        MulGeneric(op.GetName(), a);
     }
     void mul_y0(Mul3 op, Register x, Ax a) {
         const Reg64 x0 = rax;
@@ -3034,7 +3124,10 @@ public:
     }
 
     void lim(Ax a, Ax b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        GetAcc(value, a.GetName());
+        SaturateAcc<true>(value);
+        SetAccAndFlag(b.GetName(), value);
     }
 
     void vtrclr0() {
@@ -3308,10 +3401,12 @@ public:
         const Reg64 y = x;
         RnAddressAndModify(uj, sj, y, dmodj);
         const Reg64 y2 = x2;
+        c.mov(y2, y);
         OffsetAddress(uj, y2.cvt16(), oj, dmodj);
         LoadFromMemory(factors, y2);
         c.shl(factors, 16);
         LoadFromMemory(factors, y);
+        c.mov(FACTORS, factors);
         DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
         DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
     }
@@ -3386,68 +3481,69 @@ private:
         case CondValue::Eq:
             // return fz == 1;
             c.test(FLAGS, decltype(Flags::fz)::mask);
-            c.jz(end_cond, Xbyak::CodeGenerator::T_NEAR);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::Neq:
             // return fz == 0;
             c.test(FLAGS, decltype(Flags::fz)::mask);
-            c.jnz(end_cond);
+            c.jnz(end_cond, c.T_NEAR);
             break;
         case CondValue::Gt:
             // return fz == 0 && fm == 0;
             c.test(FLAGS, decltype(Flags::fz)::mask | decltype(Flags::fm)::mask);
-            c.jnz(end_cond);
+            c.jnz(end_cond, c.T_NEAR);
             break;
         case CondValue::Ge:
             // return fm == 0;
             c.test(FLAGS, decltype(Flags::fm)::mask);
-            c.jnz(end_cond);
+            c.jnz(end_cond, c.T_NEAR);
             break;
         case CondValue::Lt:
             // return fm == 1;
             c.test(FLAGS, decltype(Flags::fm)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::Le:
             // return fm == 1 || fz == 1;
             c.test(FLAGS, decltype(Flags::fm)::mask | decltype(Flags::fz)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::Nn:
             // return fn == 0;
             c.test(FLAGS, decltype(Flags::fn)::mask);
-            c.jnz(end_cond);
+            c.jnz(end_cond, c.T_NEAR);
             break;
         case CondValue::C:
             // return fc0 == 1;
             c.test(FLAGS, decltype(Flags::fc0)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::V:
             // return fv == 1;
             c.test(FLAGS, decltype(Flags::fv)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::E:
             // return fe == 1;
             c.test(FLAGS, decltype(Flags::fe)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::L:
             // return flm == 1 || fvl == 1;
             c.test(FLAGS, decltype(Flags::flm)::mask | decltype(Flags::fvl)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, c.T_NEAR);
             break;
         case CondValue::Nr:
             // return fr == 0;
             c.test(FLAGS, decltype(Flags::fr)::mask);
-            c.jnz(end_cond);
+            c.jnz(end_cond, c.T_NEAR);
             break;
         case CondValue::Niu0:
         case CondValue::Iu0:
         case CondValue::Iu1:
         default:
-            UNREACHABLE();
+            NOT_IMPLEMENTED();
+            return;
         }
         func();
         c.L(end_cond);
@@ -4316,7 +4412,7 @@ private:
                     } else {
                         if (!((!step2_mode2 || mod != mask))) {
                             c.mov(next, address);
-                            c.add(next, s);
+                            c.add(next.cvt32(), s);
                             c.and_(next, mask);
                         } else {
                             c.mov(next, address);
@@ -4643,7 +4739,7 @@ private:
     std::tuple<OffsetValue, OffsetValue> GetArpOffset(ArpStepX arpstepi, ArpStepX arpstepj) const {
         static_assert(std::is_same_v<ArpStepX, ArpStep1> || std::is_same_v<ArpStepX, ArpStep2>);
         return std::make_tuple((OffsetValue)blk_key.curr.arp[arpstepi.Index()].arpoffseti.Value(),
-                               (OffsetValue)blk_key.curr.arp[arpstepi.Index()].arpoffsetj.Value());
+                               (OffsetValue)blk_key.curr.arp[arpstepj.Index()].arpoffsetj.Value());
     }
 
     template <typename ArpRnX>
