@@ -1,3 +1,4 @@
+#pragma clang optimize off
 #include "crash.h"
 #include "timer.h"
 #include "crash.h"

@@ -1,5 +1,4 @@
 #pragma once
-#pragma clang optimize off
 #include <utility>
 #include <atomic>
 #include <stdexcept>
@@ -59,33 +58,32 @@ public:
         UNREACHABLE();
     }
 
-    void CheckInterrupt() {
-        for (std::size_t i = 0; i < 3; ++i) {
-            if (interrupt_pending[i].exchange(false)) {
-                regs.ip[i] = 1;
-            }
-        }
+    s32 total_cycles = 0;
 
-        if (vinterrupt_pending.exchange(false)) {
-            regs.ipv = 1;
-        }
-    }
-
-    void Run(u64 cycles, s32 cycles_remaining = 0) {
-        idle = false;
+    void Run(u64 cycles) {
         for (u64 i = 0; i < cycles; ++i) {
             if (idle) {
-                u64 skipped = core_timing.Skip(cycles - i - 1);
+                u64 skipped = core_timing.Skip(total_cycles - 1);
                 i += skipped;
+                total_cycles -= skipped;
 
                 // Skip additional tick so to let components fire interrupts
-                if (i < cycles - 1) {
+                if (total_cycles > 1) {
                     ++i;
+                    total_cycles--;
                     core_timing.Tick();
                 }
             }
 
-            CheckInterrupt();
+            for (std::size_t i = 0; i < 3; ++i) {
+                if (interrupt_pending[i].exchange(false)) {
+                    regs.ip[i] = 1;
+                }
+            }
+
+            if (vinterrupt_pending.exchange(false)) {
+                regs.ipv = 1;
+            }
 
             //std::printf("PC 0x%x\n", regs.pc);
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
@@ -114,13 +112,11 @@ public:
                 }
             }
 
-            const bool old_idle = idle;
-
             decoder.call(*this, opcode, expand_value);
 
             // I am not sure if a single-instruction loop is interruptable and how it is handled,
             // so just disable interrupt for it for now.
-            if (regs.ie && !regs.rep && i == cycles - 1) {
+            if (regs.ie && !regs.rep) {
                 bool interrupt_handled = false;
                 for (u32 i = 0; i < regs.im.size(); ++i) {
                     if (regs.im[i] && regs.ip[i]) {
@@ -149,12 +145,7 @@ public:
             }
 
             core_timing.Tick();
-
-            if (!old_idle && idle) {
-                // We have entered idle state, run the remainder of the the slice, like the JIT would
-                cycles = cycles_remaining;
-                i = 0;
-            }
+            total_cycles--;
         }
     }
 
@@ -1865,7 +1856,6 @@ public:
             // b loses its typical meaning in this case
             RegName b_name = b.GetNameForMovFromP();
             u64 value = ProductToBus40(Px{0});
-            printf("Interp value = 0x%lx\n", value);
             SatAndSetAccAndFlag(b_name, value);
         } else if (a.GetName() == RegName::pc) {
             if (b.GetName() == RegName::a0 || b.GetName() == RegName::a1) {
@@ -2130,7 +2120,6 @@ public:
     }
     void mov_r6(Register a) {
         u16 value = RegToBus16(a.GetName(), true);
-        printf("mov_r6 value = 0x%x\n", value);
         regs.r[6] = value;
     }
     void mov_memsp_r6() {
@@ -3745,7 +3734,6 @@ public:
         read_count["p"]++;
         read_count["pe"]++;
         u64 value = regs.p[unit] | ((u64)regs.pe[unit] << 32);
-        printf("Interp value before shift = 0x%lx\n", value);
         switch (regs.ps[unit]) {
         case 0:
             value = SignExtend<33>(value);

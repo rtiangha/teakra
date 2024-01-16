@@ -27,7 +27,7 @@ namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
 
-#define NOT_IMPLEMENTED() unimplemented = true
+#define NOT_IMPLEMENTED() UNREACHABLE()
 
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
@@ -77,9 +77,10 @@ public:
     Xbyak::CodeGenerator c;
     std::array<u8, 0x1000> pad;
     s32 cycles_remaining;
-    Xbyak::Label dispatcher_start;
+    Xbyak::Label block_exit;
     const std::vector<Matcher<EmitX64>> decoders = GetDecoderTable<EmitX64>();
     std::set<u32> bkrep_end_locations;
+    std::set<u32> rep_end_locations;
     bool compiling = false;
     std::unordered_map<size_t, Block> code_blocks;
     Block* current_blk{};
@@ -90,7 +91,10 @@ public:
         cycles_remaining = cycles;
         debug_interp = debug_interp_;
         iregs = &debug_interp->regs;
+        debug_interp->total_cycles = cycles;
         current_blk = nullptr;
+        debug_interp->idle = false;
+        regs.idle = false;
         run_code(this);
     }
 
@@ -98,7 +102,7 @@ public:
         run_code = c.getCurr<RunCodeFuncType>();
         ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLEE_SAVED, 8, 16);
 
-        Xbyak::Label dispatcher_end;
+        Xbyak::Label dispatcher_start, dispatcher_end;
         c.L(dispatcher_start);
 
         // Call LookupBlock. This will compile a new block and increment timers for us
@@ -108,6 +112,10 @@ public:
         c.jz(dispatcher_end);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&regs));
         c.jmp(ABI_RETURN);
+        c.L(block_exit);
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
+        CallFarFunction(c, DoInterruptsAndRunDebugThunk);
+        c.jmp(dispatcher_start);
         c.L(dispatcher_end);
         ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLEE_SAVED, 8, 16);
         c.ret();
@@ -118,65 +126,10 @@ public:
         return reinterpret_cast<EmitX64*>(this_ptr)->LookupNewBlock();
     }
 
+    std::array<u32, 4> last_pc{};
+    int counter = 0;
+
     BlockFunc LookupNewBlock() {
-        if (regs.idle) {
-            u64 skipped = core_timing.Skip(cycles_remaining - 1);
-            cycles_remaining -= skipped;
-            // Skip additional tick so to let components fire interrupts
-            if (cycles_remaining > 1) {
-                cycles_remaining--;
-                core_timing.Tick();
-            }
-        }
-
-        // Check for interrupts.
-        for (std::size_t i = 0; i < 3; ++i) {
-            if (interrupt_pending[i].exchange(false)) {
-                regs.ip[i] = 1;
-            }
-        }
-
-        if (vinterrupt_pending.exchange(false)) {
-            regs.ipv = 1;
-        }
-
-        if (regs.ie && !regs.rep) {
-            bool interrupt_handled = false;
-            for (u32 i = 0; i < regs.im.size(); ++i) {
-                if (regs.im[i] && regs.ip[i]) {
-                    regs.ip[i] = 0;
-                    regs.ie = 0;
-                    PushPC();
-                    regs.pc = 0x0006 + i * 8;
-                    regs.idle = false;
-                    interrupt_handled = true;
-                    if (regs.ic[i]) {
-                        ContextStore();
-                    }
-                    break;
-                }
-            }
-            if (!interrupt_handled && regs.imv && regs.ipv) {
-                regs.ipv = 0;
-                regs.ie = 0;
-                PushPC();
-                regs.pc = vinterrupt_address;
-                regs.idle = false;
-                if (vinterrupt_context_switch) {
-                    ContextStore();
-                }
-            }
-        }
-
-        // Count the cycles of the previous executed block and handle any interrupts
-        if (current_blk) {
-            //printf("JIT PC: 0x%x\n", regs.pc);
-            //printf("Interp PC: 0x%x\n", iregs->pc);
-            //CompareRegisterState();
-            core_timing.Tick(current_blk->cycles);
-            cycles_remaining -= current_blk->cycles;
-        }
-
         // Lookup and compile next block
         blk_key.pc = regs.pc;
         blk_key.sv = regs.sv;
@@ -210,23 +163,85 @@ public:
         if (new_block) {
             // Note: They key may change during compilation, so this needs to be first.
             it->second.entry_key = blk_key;
-            printf("Compiling block\n");
             CompileBlock(it->second);
         }
 
         // Check if we have enough cycles to execute it
-        //printf("cycles=%d\n", cycles_remaining);
         if (cycles_remaining < current_blk->cycles) {
-            printf("Done slice\n");
+            //printf("Done slice\n");
             return nullptr;
         }
 
-        // DEBUG: Run interpreter before running block. We will compare register
-        // state when the dispatcher is re-entered to ensure JIT was correct.
-        //debug_interp->Run(current_blk->cycles, cycles_remaining);
+        // Check if we are idle, and skip ahead
+        if (regs.idle) {
+            u64 skipped = core_timing.Skip(cycles_remaining - 1);
+            cycles_remaining -= skipped;
+            // Skip additional tick so to let components fire interrupts
+            if (cycles_remaining > 1) {
+                cycles_remaining--;
+                core_timing.Tick();
+            }
+        }
+
+        // Check for interrupts.
+        for (std::size_t i = 0; i < 3; ++i) {
+            if (interrupt_pending[i].exchange(false)) {
+                regs.ip[i] = 1;
+            }
+        }
+
+        if (vinterrupt_pending.exchange(false)) {
+            regs.ipv = 1;
+        }
 
         // Return block function
+        last_pc[counter++] = regs.pc;
+        counter = counter % 4;
         return current_blk->func;
+    }
+
+    static void DoInterruptsAndRunDebugThunk(void* this_ptr) {
+        reinterpret_cast<EmitX64*>(this_ptr)->DoInterruptsAndRunDebug();
+    }
+
+    void DoInterruptsAndRunDebug() {
+        if (regs.ie && !regs.rep) {
+            bool interrupt_handled = false;
+            for (u32 i = 0; i < regs.im.size(); ++i) {
+                if (regs.im[i] && regs.ip[i]) {
+                    regs.ip[i] = 0;
+                    regs.ie = 0;
+                    PushPC();
+                    regs.pc = 0x0006 + i * 8;
+                    regs.idle = false;
+                    interrupt_handled = true;
+                    if (regs.ic[i]) {
+                        ContextStore();
+                    }
+                    break;
+                }
+            }
+            if (!interrupt_handled && regs.imv && regs.ipv) {
+                regs.ipv = 0;
+                regs.ie = 0;
+                PushPC();
+                regs.pc = vinterrupt_address;
+                regs.idle = false;
+                if (vinterrupt_context_switch) {
+                    ContextStore();
+                }
+            }
+        }
+
+        // Count the cycles of the previous executed block.
+        core_timing.Tick(current_blk->cycles);
+        cycles_remaining -= current_blk->cycles;
+
+        // DEBUG: Run interpreter before running block. We will compare register
+        // state when the dispatcher is re-entered to ensure JIT was correct.
+        //debug_interp->Run(current_blk->cycles);
+        //ASSERT(cycles_remaining == debug_interp->total_cycles);
+        //CompareRegisterState();
     }
 
     void CompileBlock(Block& blk) {
@@ -240,10 +255,11 @@ public:
         c.mov(A[1], qword[REGS + offsetof(JitRegisters, a) + sizeof(u64)]);
         c.mov(B[0], qword[REGS + offsetof(JitRegisters, b)]);
         c.mov(B[1], qword[REGS + offsetof(JitRegisters, b) + sizeof(u64)]);
-        c.mov(FLAGS, dword[REGS + offsetof(JitRegisters, flags)]);
+        c.mov(FLAGS, word[REGS + offsetof(JitRegisters, flags)]);
 
         compiling = true;
         while (compiling) {
+            const u32 current_pc = regs.pc;
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
             auto& decoder = decoders[opcode];
             u16 expand_value = 0;
@@ -254,14 +270,30 @@ public:
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
 
-            if (blk.cycles >= cycles_remaining) {
+            if (blk.cycles >= 1) {
+                if (compiling) {
+                    c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+                }
                 compiling = false;
             }
 
-            if (blk.cycles == 32 && compiling) {
-                c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            if (rep_end_locations.contains(current_pc)) {
+                Xbyak::Label end_label, jump_back_label;
+                c.cmp(word[REGS + offsetof(JitRegisters, repc)], 0);
+                c.jnz(jump_back_label);
+                c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc); // Loop done, move to next
+                c.jmp(end_label);
+                c.L(jump_back_label);
+                c.sub(word[REGS + offsetof(JitRegisters, repc)], 1); // Loop not done, go back to current
+                c.mov(dword[REGS + offsetof(JitRegisters, pc)], current_pc);
+                c.L(end_label);
                 compiling = false;
             }
+
+            /*if (blk.cycles == 32 && compiling) {
+                c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+                compiling = false;
+            }*/
 
             if (bkrep_end_locations.contains(regs.pc - 1)) {
                 EmitBkrepReturn(regs.pc);
@@ -276,8 +308,8 @@ public:
         c.mov(qword[REGS + offsetof(JitRegisters, a) + sizeof(u64)], A[1]);
         c.mov(qword[REGS + offsetof(JitRegisters, b)], B[0]);
         c.mov(qword[REGS + offsetof(JitRegisters, b) + sizeof(u64)], B[1]);
-        c.mov(dword[REGS + offsetof(JitRegisters, flags)], FLAGS);
-        c.jmp(dispatcher_start);
+        c.mov(word[REGS + offsetof(JitRegisters, flags)], FLAGS.cvt16());
+        c.jmp(block_exit);
     }
 
     void EmitBkrepReturn(u32 next_pc) {
@@ -329,7 +361,7 @@ public:
             c.sub(sp, 1);
             StoreToMemory(sp, h);
         }
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
 
     void PushPC() {
@@ -358,7 +390,7 @@ public:
             LoadFromMemory(pc, sp);
             c.add(sp, 1);
         }
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], pc.cvt32());
     }
 
@@ -578,9 +610,8 @@ public:
             AddSub(value, product, result, false);
             SatAndSetAccAndFlag(b.GetName(), result);
         }
-        [[fallthrough]];
+            [[fallthrough]];
         case AlmOp::Sqr: {
-            printf("JIT Sqr\n");
             c.and_(a, 0xFFFF);
             c.mov(FACTORS.cvt16(), a.cvt16());
             c.ror(FACTORS, 32);
@@ -1106,7 +1137,7 @@ public:
     }
 
     void app(Ab c, SumBase base, bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        NOT_IMPLEMENTED();
+        ProductSum(base, c.GetName(), sub_p0, p0_align, sub_p1, p1_align);
     }
 
     void add_add(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, Ab b) {
@@ -1512,7 +1543,10 @@ public:
         BlockRepeat(lc, address);
     }
     void bkrep_r6(Address18_16 addr_low, Address18_2 addr_high) {
-        NOT_IMPLEMENTED();
+        const Reg64 lc = rax;
+        RegToBus16(RegName::r6, lc);
+        u32 address = Address32(addr_low, addr_high);
+        BlockRepeat(lc, address);
     }
 
     static void DoBkrepStackCopyThunk(JitRegisters* regs) {
@@ -1607,7 +1641,7 @@ public:
         const Reg64 sp = rbx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         RestoreBlockRepeat(sp);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void bkrepsto(ArRn2 a) {
         NOT_IMPLEMENTED();
@@ -1616,7 +1650,7 @@ public:
         const Reg64 sp = rbx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         StoreBlockRepeat(sp);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
 
     void banke(BankFlags flags) {
@@ -1658,7 +1692,7 @@ public:
         }
     }
     void bankr() {
-         NOT_IMPLEMENTED();
+        NOT_IMPLEMENTED();
     }
     void bankr(Ar a) {
         NOT_IMPLEMENTED();
@@ -1677,7 +1711,7 @@ public:
         NOT_IMPLEMENTED();
     }
     void bitrev_ebrv(Rn a) {
-         NOT_IMPLEMENTED();
+        NOT_IMPLEMENTED();
     }
 
     void br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
@@ -1702,16 +1736,16 @@ public:
     }
 
     void break_() {
-         NOT_IMPLEMENTED();
+        NOT_IMPLEMENTED();
     }
 
     void call(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
-         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-         ConditionPass(cond, [&] {
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        ConditionPass(cond, [&] {
             EmitPushPC();
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], Address32(addr_low, addr_high));
-         });
-         compiling = false;
+        });
+        compiling = false;
     }
     void calla(Axl a) {
         NOT_IMPLEMENTED();
@@ -1801,6 +1835,7 @@ public:
         compiling = false;
     }
     void retic(Cond cond) {
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         ConditionPass(cond, [&] {
             EmitPopPC();
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
@@ -1868,13 +1903,15 @@ public:
         c.mov(word[REGS + offsetof(JitRegisters, pcmhi)], a.Unsigned16());
     }
     void load_ps01(Imm4 a) {
-        const u16 mask = (a.Unsigned16() & 0xF) << decltype(Mod0::ps0)::position;
+        const u16 ps0 = a.Unsigned16() & 3;
+        const u16 ps1 = a.Unsigned16() >> 2;
+        const u16 mask = (ps0 << decltype(Mod0::ps0)::position) | (ps1 << decltype(Mod0::ps1)::position);
         c.mov(ax, word[REGS + offsetof(JitRegisters, mod0)]);
         c.and_(ax, ~(decltype(Mod0::ps0)::mask | decltype(Mod0::ps1)::mask));
         c.or_(ax, mask);
         c.mov(word[REGS + offsetof(JitRegisters, mod0)], ax);
-        blk_key.curr.mod0.ps0.Assign(a.Unsigned16() & 3);
-        blk_key.curr.mod0.ps1.Assign(a.Unsigned16() >> 2);
+        blk_key.curr.mod0.ps0.Assign(ps0);
+        blk_key.curr.mod0.ps1.Assign(ps1);
     }
 
     void push(Imm16 a) {
@@ -1882,7 +1919,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, a.Unsigned16());
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push(Register a) {
         const Reg64 value = rbx;
@@ -1891,7 +1928,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push(Abe a) {
         const Reg64 value = rbx;
@@ -1901,7 +1938,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
 
     std::optional<u16> IsArpArpSttModConst(ArArpSttMod a) {
@@ -1935,13 +1972,13 @@ public:
         c.sub(sp, 1);
         if (auto value = IsArpArpSttModConst(a); value.has_value()) {
             StoreToMemory(sp, value.value());
-            c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+            c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
             return;
         }
         const Reg64 value = rax;
         RegToBus16(a.GetName(), value);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_prpage() {
         NOT_IMPLEMENTED();
@@ -1956,7 +1993,7 @@ public:
         c.sub(sp, 1);
         c.shr(value, 16);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_r6() {
         const Reg64 value = rax;
@@ -1965,7 +2002,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_repc() {
         const Reg64 value = rax;
@@ -1974,7 +2011,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_x0() {
         const Reg64 value = rax;
@@ -1983,7 +2020,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_x1() {
         const Reg64 value = rax;
@@ -1992,7 +2029,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void push_y1() {
         const Reg64 value = rax;
@@ -2001,7 +2038,7 @@ public:
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void pusha(Ax a) {
         const Reg64 value = rbx;
@@ -2013,7 +2050,7 @@ public:
         c.sub(sp, 1);
         c.shr(value, 16);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
     void pusha(Bx a) {
         const Reg64 value = rbx;
@@ -2025,7 +2062,7 @@ public:
         c.sub(sp, 1);
         c.shr(value, 16);
         StoreToMemory(sp, value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
 
     void pop(Register a) {
@@ -2034,7 +2071,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         RegFromBus16(a.GetName(), value);
     }
     void pop(Abe a) {
@@ -2043,7 +2080,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.movsx(value.cvt32(), value.cvt8());
         c.shl(value, 32);
         c.mov(value.cvt32(), GetAccDirect(a.GetName()));
@@ -2055,7 +2092,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         RegFromBus16(a.GetName(), value);
     }
     void pop(Bx a) {
@@ -2073,7 +2110,7 @@ public:
         c.shl(value, 16);
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         ProductFromBus32(a, value.cvt32());
     }
     void pop_r6() {
@@ -2082,7 +2119,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         RegFromBus16(RegName::r6, value);
     }
     void pop_repc() {
@@ -2091,7 +2128,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
     }
     void pop_x0() {
@@ -2100,7 +2137,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
@@ -2111,7 +2148,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.rorx(FACTORS, FACTORS, 48);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 16);
@@ -2122,7 +2159,7 @@ public:
         const Reg64 value = rcx;
         LoadFromMemory(value, sp);
         c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.rorx(FACTORS, FACTORS, 16);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 48);
@@ -2138,7 +2175,7 @@ public:
         c.add(sp, 1);
         SignExtend(value, 32);
         SetAccAndFlag(a.GetName(), value);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp);
+        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
 
     void rep(Imm8 a) {
@@ -2156,15 +2193,20 @@ public:
         }
     }
     void rep(Register a) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        RegToBus16(a.GetName(), value);
+        c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        compiling = false;
+        rep_end_locations.insert(regs.pc);
     }
     void rep_r6() {
         NOT_IMPLEMENTED();
     }
 
     void shfc(Ab a, Ab b, Cond cond) {
-        NOT_IMPLEMENTED();
-        return;
+        //NOT_IMPLEMENTED();
+        //return;
         ConditionPass(cond, [&] {
             const Reg64 value = rax;
             GetAcc(value, a.GetName());
@@ -2361,7 +2403,12 @@ public:
         NOT_IMPLEMENTED();
     }
     void modr_eemod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
-        NOT_IMPLEMENTED();
+        u32 uniti, unitj;
+        StepValue stepi, stepj;
+        std::tie(uniti, unitj) = GetArpRnUnit(a);
+        std::tie(stepi, stepj) = GetArpStep(asi, asj);
+        RnAndModifyNoPreserve(uniti, stepi, rax);
+        RnAndModifyNoPreserve(unitj, stepj, rax);
     }
     void modr_edmod(ArpRn2 a, ArpStep2 asi, ArpStep2 asj) {
         NOT_IMPLEMENTED();
@@ -2400,7 +2447,9 @@ public:
     }
 
     void mov(Ab a, Ab b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        GetAcc(value, a.GetName());
+        SatAndSetAccAndFlag(b.GetName(), value);
     }
     void mov_dvm(Abl a) {
         NOT_IMPLEMENTED();
@@ -2412,7 +2461,11 @@ public:
         NOT_IMPLEMENTED();
     }
     void mov_y1(Abl a) {
-        NOT_IMPLEMENTED();
+        const Reg64 value16 = rax;
+        RegToBus16(a.GetName(), value16, true);
+        c.rorx(FACTORS, FACTORS, 16);
+        c.mov(FACTORS.cvt16(), value16.cvt16());
+        c.rorx(FACTORS, FACTORS, 48);
     }
 
     static void MemDataWriteThunk(void* mem_ptr, u16 address, u16 data) {
@@ -2712,7 +2765,7 @@ public:
     }
 
     void mov_repc_to(ArRn1 b, ArStep1 bs) {
-         NOT_IMPLEMENTED();
+        NOT_IMPLEMENTED();
     }
     void mov(ArArp a, ArRn1 b, ArStep1 bs) {
         NOT_IMPLEMENTED();
@@ -2769,7 +2822,9 @@ public:
         NOT_IMPLEMENTED();
     }
     void mov_p0(Ab a) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        GetAndSatAcc(value, a.GetName());
+        ProductFromBus32(Px{0}, value.cvt32());
     }
     void mov_p1_to(Ab b) {
         NOT_IMPLEMENTED();
@@ -2887,7 +2942,20 @@ public:
         NOT_IMPLEMENTED();
     }
     void exchange_jai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
-        NOT_IMPLEMENTED();
+        auto [ui, uj] = GetArpRnUnit(b);
+        auto [si, sj] = GetArpStep(bsi, bsj);
+        const Reg64 i = rax;
+        const Reg64 j = rbx;
+        RnAddressAndModify(ui, si, i);
+        RnAddressAndModify(uj, sj, j);
+        const Reg64 value = rcx;
+        GetAndSatAccNoFlag(value, a.GetName());
+        c.shr(value, 16);
+        StoreToMemory(i, value);
+        LoadFromMemory(value, j);
+        c.shl(value, 16);
+        SignExtend(value, 32);
+        SetAcc(a.GetName(), value);
     }
     void exchange_rjai(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
         NOT_IMPLEMENTED();
@@ -2998,7 +3066,10 @@ public:
         NOT_IMPLEMENTED();
     }
     void clrp() {
-        NOT_IMPLEMENTED();
+        const Reg32 tmp = eax;
+        c.xor_(tmp, tmp);
+        ProductFromBus32(Px{0}, tmp);
+        ProductFromBus32(Px{1}, tmp);
     }
 
     void max_ge(Ax a, StepZIDS bs) {
@@ -3032,7 +3103,26 @@ public:
         NOT_IMPLEMENTED();
     }
     void min_lt(Ax a, StepZIDS bs) {
-        NOT_IMPLEMENTED();
+        const Reg64 u = rax;
+        const Reg64 v = rbx;
+        GetAcc(u, a.GetName());
+        GetAcc(v, CounterAcc(a.GetName()));
+        const Reg64 d = rcx;
+        c.mov(d, v);
+        c.sub(d, u);
+        const Reg64 r0 = u;
+        RnAndModify(0, bs.GetName(), r0);
+
+        Xbyak::Label end_label, false_label;
+        c.bt(d, 63);
+        c.jnc(false_label);
+        c.or_(FLAGS, decltype(Flags::fm)::mask);
+        c.mov(word[REGS + offsetof(JitRegisters, mixp)], r0.cvt16());
+        SetAcc(a.GetName(), v);
+        c.jmp(end_label);
+        c.L(false_label);
+        c.and_(FLAGS, ~decltype(Flags::fm)::mask);
+        c.L(end_label);
     }
 
     void max_ge_r0(Ax a, StepZIDS bs) {
@@ -3145,6 +3235,53 @@ public:
         NOT_IMPLEMENTED();
     }
 
+    void ProductSum(SumBase base, RegName acc, bool sub_p0, bool p0_align, bool sub_p1,
+                    bool p1_align) {
+        const Reg64 value_a = rax;
+        const Reg64 value_b = rbx;
+        ProductToBus40(value_a, Px{0});
+        ProductToBus40(value_b, Px{1});
+        if (p0_align) {
+            c.shr(value_a, 16);
+            SignExtend(value_a, 24);
+        }
+        if (p1_align) {
+            c.shr(value_b, 16);
+            SignExtend(value_b, 24);
+        }
+        const Reg64 value_c = rcx;
+        switch (base) {
+        case SumBase::Zero:
+            c.xor_(value_c, value_c);
+            break;
+        case SumBase::Acc:
+            GetAcc(value_c, acc);
+            break;
+        case SumBase::Sv:
+            c.mov(value_c, ::SignExtend<32, u64>((u64)blk_key.sv << 16));
+            break;
+        case SumBase::SvRnd:
+            c.mov(value_c, ::SignExtend<32, u64>((u64)blk_key.sv << 16) | 0x8000);
+            break;
+        default:
+            UNREACHABLE();
+        }
+        const Reg64 result = rdx;
+        AddSub(value_c, value_a, result, sub_p0);
+        const Reg32 temp = value_a.cvt32();
+        c.mov(temp, FLAGS);
+        c.and_(temp, decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask); // Keep fc0 and fv
+        const Reg64 result2 = value_c;
+        AddSub(result, value_b, result2, sub_p1);
+        // Is this correct?
+        if (sub_p0 == sub_p1) {
+            c.or_(FLAGS, temp);
+        } else {
+            c.xor_(FLAGS, temp);
+        }
+        SatAndSetAccAndFlag(acc, result2);
+    }
+
     void mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
              bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
         NOT_IMPLEMENTED();
@@ -3154,7 +3291,29 @@ public:
     void mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
              bool sub_p1, bool p1_align) {
-        NOT_IMPLEMENTED();
+        ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
+        auto [ui, uj] = GetArpRnUnit(xy);
+        auto [si, sj] = GetArpStep(i, j);
+        auto [oi, oj] = GetArpOffset(i, j);
+        const Reg64 x = rbx;
+        RnAddressAndModify(ui, si, x, dmodi);
+        const Reg64 x2 = rax;
+        c.mov(x2, x);
+        OffsetAddress(ui, x2.cvt16(), oi, dmodi);
+        const Reg64 factors = rcx;
+        LoadFromMemory(factors, x2);
+        c.shl(factors, 16);
+        LoadFromMemory(factors, x);
+        c.shl(factors, 16);
+        const Reg64 y = x;
+        RnAddressAndModify(uj, sj, y, dmodj);
+        const Reg64 y2 = x2;
+        OffsetAddress(uj, y2.cvt16(), oj, dmodj);
+        LoadFromMemory(factors, y2);
+        c.shl(factors, 16);
+        LoadFromMemory(factors, y);
+        DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
+        DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
     }
 
     void mma_mx_xy(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
@@ -3172,7 +3331,20 @@ public:
     void mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        NOT_IMPLEMENTED();
+        ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
+        u16 unit = GetArRnUnit(x);
+        const Reg64 address = rax;
+        RnAddressAndModify(unit, GetArStep(xs), address);
+        const Reg64 address2 = rbx;
+        c.mov(address2, address);
+        OffsetAddress(unit, address2.cvt16(), GetArOffset(xs));
+        c.rorx(FACTORS, FACTORS, 32);
+        LoadFromMemory(FACTORS, address);
+        c.rorx(FACTORS, FACTORS, 16);
+        LoadFromMemory(FACTORS, address2);
+        c.rorx(FACTORS, FACTORS, 16);
+        DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
+        DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
     }
 
     void mma_mov(Axh u, Bxh v, ArRn1 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign,
@@ -3214,7 +3386,7 @@ private:
         case CondValue::Eq:
             // return fz == 1;
             c.test(FLAGS, decltype(Flags::fz)::mask);
-            c.jz(end_cond);
+            c.jz(end_cond, Xbyak::CodeGenerator::T_NEAR);
             break;
         case CondValue::Neq:
             // return fz == 0;
@@ -3399,22 +3571,22 @@ private:
             break;
 
         case RegName::ar0:
-            c.mov(out, blk_key.curr.ar[0].raw);
+            c.mov(out, blk_key.curr.ar[0].raw & ArU::Mask());
             break;
         case RegName::ar1:
-            c.mov(out, blk_key.curr.ar[1].raw);
+            c.mov(out, blk_key.curr.ar[1].raw & ArU::Mask());
             break;
         case RegName::arp0:
-            c.mov(out, blk_key.curr.arp[0].raw);
+            c.mov(out, blk_key.curr.arp[0].raw & ArpU::Mask());
             break;
         case RegName::arp1:
-            c.mov(out, blk_key.curr.arp[1].raw);
+            c.mov(out, blk_key.curr.arp[1].raw & ArpU::Mask());
             break;
         case RegName::arp2:
-            c.mov(out, blk_key.curr.arp[2].raw);
+            c.mov(out, blk_key.curr.arp[2].raw & ArpU::Mask());
             break;
         case RegName::arp3:
-            c.mov(out, blk_key.curr.arp[3].raw);
+            c.mov(out, blk_key.curr.arp[3].raw & ArpU::Mask());
             break;
 
         default:
@@ -3571,18 +3743,18 @@ private:
 
         case RegName::cfgi:
             c.mov(word[REGS + offsetof(JitRegisters, cfgi)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::cfgj:
             c.mov(word[REGS + offsetof(JitRegisters, cfgj)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
 
         case RegName::st0:
             regs.SetSt0(c, value, blk_key.curr.mod0);
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
 
@@ -3597,17 +3769,17 @@ private:
             break;
 
         case RegName::mod0:
-            c.mov(word[REGS + offsetof(JitRegisters, mod0)], blk_key.curr.mod0.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, mod0)], value.cvt16());
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false;
             break;
         case RegName::mod1:
-            c.mov(word[REGS + offsetof(JitRegisters, mod1)], blk_key.curr.mod1.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, mod1)], value.cvt16());
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false;
             break;
         case RegName::mod2:
-            c.mov(word[REGS + offsetof(JitRegisters, mod2)], blk_key.curr.mod2.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, mod2)], value.cvt16());
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false;
             break;
@@ -3617,32 +3789,32 @@ private:
 
         case RegName::ar0:
             c.mov(word[REGS + offsetof(JitRegisters, ar)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::ar1:
             c.mov(word[REGS + offsetof(JitRegisters, ar) + sizeof(u16)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::arp0:
             c.mov(word[REGS + offsetof(JitRegisters, arp)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::arp1:
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16)], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::arp2:
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 2], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
         case RegName::arp3:
             c.mov(word[REGS + offsetof(JitRegisters, arp) + sizeof(u16) * 3], value.cvt16());
-            c.mov(word[REGS + offsetof(JitRegisters, pc)], regs.pc);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             compiling = false; // Static state changed, end block
             break;
 
@@ -3746,6 +3918,11 @@ private:
             regs.SetCfgj(c, value);
             break;
 
+        case RegName::sv:
+            blk_key.sv = value;
+            c.mov(word[REGS + offsetof(JitRegisters, sv)], value);
+            break;
+
         case RegName::st0:
             regs.SetSt0(c, value, blk_key.curr.mod0);
             break;
@@ -3783,7 +3960,6 @@ private:
             break;
 
         default:
-            //UNREACHABLE();
             NOT_IMPLEMENTED();
         }
     }
@@ -3882,14 +4058,16 @@ private:
         }
     }
 
-    template <typename T>
+    template <bool flag, typename T>
     void SaturateAcc(T& value) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
             Xbyak::Label end_saturate;
             c.movsxd(rsi, value.cvt32()); // rbx = SignExtend<32>(value);
             c.cmp(value, rsi);
             c.je(end_saturate);
-            c.or_(FLAGS, decltype(Flags::flm)::mask); // regs.flm = 1;
+            if constexpr (flag) {
+                c.or_(FLAGS, decltype(Flags::flm)::mask); // regs.flm = 1;
+            }
             c.shr(value, 39);
             c.mov(rsi, 0x0000'0000'7FFF'FFFF);
             c.test(value, value);
@@ -3899,7 +4077,9 @@ private:
             c.L(end_saturate);
         } else {
             if (value != ::SignExtend<32>(value)) {
-                c.or_(FLAGS, decltype(Flags::flm)::mask); // regs.flm = 1;
+                if constexpr (flag) {
+                    c.or_(FLAGS, decltype(Flags::flm)::mask); // regs.flm = 1;
+                }
                 if ((value >> 39) != 0)
                     value = 0xFFFF'FFFF'8000'0000;
                 else
@@ -3913,7 +4093,7 @@ private:
     void SatAndSetAccAndFlag(RegName name, T value) {
         SetAccFlag(value);
         if (!blk_key.curr.mod0.sata) {
-            SaturateAcc(value);
+            SaturateAcc<true>(value);
         }
         SetAcc(name, value);
     }
@@ -3926,7 +4106,14 @@ private:
     void GetAndSatAcc(Reg64 out, RegName name) {
         GetAcc(out, name);
         if (!blk_key.curr.mod0.sat) {
-            SaturateAcc(out);
+            SaturateAcc<true>(out);
+        }
+    }
+
+    void GetAndSatAccNoFlag(Reg64 out, RegName name) {
+        GetAcc(out, name);
+        if (!blk_key.curr.mod0.sat) {
+            SaturateAcc<false>(out);
         }
     }
 
@@ -4214,6 +4401,7 @@ private:
                 default:
                     UNREACHABLE();
                 }
+                c.xor_(out, out);
                 return;
             }
         }
@@ -4231,11 +4419,13 @@ private:
         case 2:
             c.ror(R0_1_2_3, 32);
             StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            c.movzx(out, R0_1_2_3.cvt16());
             c.rol(R0_1_2_3, 32);
             break;
         case 3:
             c.ror(R0_1_2_3, 48);
             StepAddress(unit, R0_1_2_3.cvt16(), step, dmod);
+            c.movzx(out, R0_1_2_3.cvt16());
             c.rol(R0_1_2_3, 48);
             break;
         case 4:
@@ -4251,11 +4441,13 @@ private:
         case 6:
             c.ror(R4_5_6_7, 32);
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.movzx(out, R0_1_2_3.cvt16());
             c.rol(R4_5_6_7, 32);
             break;
         case 7:
             c.ror(R4_5_6_7, 48);
             StepAddress(unit, R4_5_6_7.cvt16(), step, dmod);
+            c.movzx(out, R0_1_2_3.cvt16());
             c.rol(R4_5_6_7, 48);
             break;
         default:
@@ -4447,6 +4639,26 @@ private:
         return ConvertArStep(value);
     }
 
+    template <typename ArpStepX>
+    std::tuple<OffsetValue, OffsetValue> GetArpOffset(ArpStepX arpstepi, ArpStepX arpstepj) const {
+        static_assert(std::is_same_v<ArpStepX, ArpStep1> || std::is_same_v<ArpStepX, ArpStep2>);
+        return std::make_tuple((OffsetValue)blk_key.curr.arp[arpstepi.Index()].arpoffseti.Value(),
+                               (OffsetValue)blk_key.curr.arp[arpstepi.Index()].arpoffsetj.Value());
+    }
+
+    template <typename ArpRnX>
+    std::tuple<u16, u16> GetArpRnUnit(ArpRnX arprn) const {
+        static_assert(std::is_same_v<ArpRnX, ArpRn1> || std::is_same_v<ArpRnX, ArpRn2>);
+        return std::make_tuple(blk_key.curr.arp[arprn.Index()].arprni, blk_key.curr.arp[arprn.Index()].arprnj + 4);
+    }
+
+    template <typename ArpStepX>
+    std::tuple<StepValue, StepValue> GetArpStep(ArpStepX arpstepi, ArpStepX arpstepj) const {
+        static_assert(std::is_same_v<ArpStepX, ArpStep1> || std::is_same_v<ArpStepX, ArpStep2>);
+        return std::make_tuple(ConvertArStep(blk_key.curr.arp[arpstepi.Index()].arpstepi),
+                               ConvertArStep(blk_key.curr.arp[arpstepj.Index()].arpstepj));
+    }
+
     template <typename ArStepX>
     OffsetValue GetArOffset(ArStepX arstep) const {
         static_assert(std::is_same_v<ArStepX, ArStep1> || std::is_same_v<ArStepX, ArStep2>);
@@ -4502,8 +4714,10 @@ private:
                     result = false;
                 }
             }
+            std::fflush(stdout);
         }
         if (!(regs.pc == iregs->pc && regs.r == iregs->r && regs.cpc == iregs->cpc && regs.prpage == iregs->prpage && regs.repc == iregs->repc && regs.repcs == iregs->repcs)) {
+            std::fflush(stdout);
             printf("Failed part 0 of checks\n");
             result = false;
         }
@@ -4511,7 +4725,7 @@ private:
             printf("Failed part 1 of checks\n");
             result = false;
         }
-        if (!(regs.rep == iregs->rep && regs.crep == iregs->crep && regs.a == iregs->a && regs.b == iregs->b)) {
+        if (!(regs.crep == iregs->crep && regs.a == iregs->a && regs.b == iregs->b)) {
             printf("Failed part 2 of checks\n");
             result = false;
         }
@@ -4520,10 +4734,15 @@ private:
             result = false;
         }
         if (!(regs.flags.fz == iregs->fz && regs.flags.fm == iregs->fm && regs.flags.fn == iregs->fn && regs.flags.fv == iregs->fv && regs.flags.fe == iregs->fe)) {
+            const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[0x78d6 * 2];
+            const u16 jit = *(u16*)&raw[0x78d6 * 2];
+            printf("Interp 0x%x JIT 0x%x\n", interp, jit);
+            std::fflush(stdout);
             printf("Failed part 4 of checks\n");
             result = false;
         }
         if (!(regs.flags.fc0 == iregs->fc0 && regs.flags.fc1 == iregs->fc1 && regs.flags.flm == iregs->flm && regs.flags.fvl == iregs->fvl && regs.flags.fr == iregs->fr)) {
+            std::fflush(stdout);
             printf("Failed part 5 of checks\n");
             result = false;
         }

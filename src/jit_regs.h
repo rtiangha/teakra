@@ -67,6 +67,11 @@ union ArU {
     BitField<8, 2, u16> aroffset0;
     BitField<10, 3, u16> arrn1;
     BitField<13, 3, u16> arrn0;
+
+    static u16 Mask() {
+        return decltype(arstep1)::mask | decltype(aroffset1)::mask | decltype(arstep0)::mask
+             | decltype(aroffset0)::mask | decltype(arrn1)::mask | decltype(arrn0)::mask;
+    }
 };
 
 union ArpU {
@@ -77,6 +82,11 @@ union ArpU {
     BitField<8, 2, u16> arpoffsetj;
     BitField<10, 2, u16> arprni;
     BitField<13, 2, u16> arprnj;
+
+    static u16 Mask() {
+        return decltype(arpstepi)::mask | decltype(arpoffseti)::mask | decltype(arpstepj)::mask
+               | decltype(arpoffsetj)::mask | decltype(arprni)::mask | decltype(arprnj)::mask;
+    }
 };
 
 union Mod0 {
@@ -390,9 +400,11 @@ struct JitRegisters {
     u16 sv = 0;   // 16-bit two's complement shift value
 
     Flags flags{};  // Not a register, but used to store host flags register.
+    u16 pad7 = 0;
 
     // Shadows
     Flags flagsb{};
+    u16 pad8 = 0;
 
     // Viterbi
     u16 vtr0 = 0;
@@ -640,9 +652,9 @@ struct JitRegisters {
         c.shr(rsi, 15);
         c.or_(out.cvt8(), sil);
         c.ror(out, 2);
-        c.mov(sil, FLAGS.cvt8());
-        c.shr(sil, 2);
-        c.shl(sil, 1);
+        c.mov(si, FLAGS.cvt16());
+        c.shr(si, 2);
+        c.shl(si, 1);
         c.or_(out.cvt8(), FLAGS.cvt8());
         c.and_(out.cvt8(), 0b11);
         c.or_(out.cvt8(), sil);
@@ -739,7 +751,7 @@ struct JitRegisters {
             c.shl(value, 32 - decltype(St1::ps0_alias)::bits);
             c.shr(value.cvt32(), 4);
             c.or_(rsi, value.cvt32());
-            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], rsi);
+            c.mov(dword[REGS + offsetof(JitRegisters, mod1)], rsi.cvt32());
 
             // Replace upper word of a[1] with sign extended a1e.
             c.shl(value, 32 - decltype(St1::a1e_alias)::bits);
