@@ -59,6 +59,7 @@ void SourceStatus() {
     state.notifyDsp();
     state.waitForSync();
     state.notifyDsp();
+    state.waitForSync();
 
     const auto osConvertVirtToPhys = [&](u32* addr) {
         return ((u8*)addr - fcram.get()) + FCRAM_PADDR;
@@ -76,29 +77,36 @@ void SourceStatus() {
         u16 buffer_id = 0;
         size_t next_queue_position = 0;
 
-        state.write().source_configurations->config[0].play_position = 0;
-        state.write().source_configurations->config[0].physical_address = osConvertVirtToPhys(audio_buffer3);
-        state.write().source_configurations->config[0].length = NUM_SAMPLES;
-        state.write().source_configurations->config[0].mono_or_stereo.Assign(DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Stereo);
-        state.write().source_configurations->config[0].format.Assign(DSP::HLE::SourceConfiguration::Configuration::Format::PCM16);
-        state.write().source_configurations->config[0].fade_in.Assign(0);
-        state.write().source_configurations->config[0].adpcm_dirty.Assign(0);
-        state.write().source_configurations->config[0].is_looping.Assign(0);
-        state.write().source_configurations->config[0].buffer_id = ++buffer_id;
-        state.write().source_configurations->config[0].partial_reset_flag.Assign(1);
-        state.write().source_configurations->config[0].play_position_dirty.Assign(1);
-        state.write().source_configurations->config[0].embedded_buffer_dirty.Assign(1);
-
-        state.write().source_configurations->config[0].buffers[next_queue_position].physical_address = osConvertVirtToPhys(buffer_id % 2 ? audio_buffer2 : audio_buffer);
-        state.write().source_configurations->config[0].buffers[next_queue_position].length = NUM_SAMPLES;
-        state.write().source_configurations->config[0].buffers[next_queue_position].adpcm_dirty = false;
-        state.write().source_configurations->config[0].buffers[next_queue_position].is_looping = false;
-        state.write().source_configurations->config[0].buffers[next_queue_position].buffer_id = ++buffer_id;
-        state.write().source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
+        for (int i = 0; i < 2; i++) {
+            state.write(i).source_configurations->config[0].play_position = 0;
+            state.write(i).source_configurations->config[0].physical_address = osConvertVirtToPhys(audio_buffer3);
+            state.write(i).source_configurations->config[0].length = NUM_SAMPLES;
+            state.write(i).source_configurations->config[0].mono_or_stereo.Assign(DSP::HLE::SourceConfiguration::Configuration::MonoOrStereo::Stereo);
+            state.write(i).source_configurations->config[0].format.Assign(DSP::HLE::SourceConfiguration::Configuration::Format::PCM16);
+            state.write(i).source_configurations->config[0].fade_in.Assign(0);
+            state.write(i).source_configurations->config[0].adpcm_dirty.Assign(0);
+            state.write(i).source_configurations->config[0].is_looping.Assign(0);
+            state.write(i).source_configurations->config[0].buffer_id = buffer_id;
+        }
+        buffer_id++;
+        for (int i = 0; i < 2; i++) {
+            state.write(i).source_configurations->config[0].partial_reset_flag.Assign(1);
+            state.write(i).source_configurations->config[0].play_position_dirty.Assign(1);
+            state.write(i).source_configurations->config[0].embedded_buffer_dirty.Assign(1);
+            state.write(i).source_configurations->config[0].buffers[next_queue_position].physical_address = osConvertVirtToPhys(buffer_id % 2 ? audio_buffer2 : audio_buffer);
+            state.write(i).source_configurations->config[0].buffers[next_queue_position].length = NUM_SAMPLES;
+            state.write(i).source_configurations->config[0].buffers[next_queue_position].adpcm_dirty = false;
+            state.write(i).source_configurations->config[0].buffers[next_queue_position].is_looping = false;
+            state.write(i).source_configurations->config[0].buffers[next_queue_position].buffer_id = buffer_id;
+            state.write(i).source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
+        }
+        buffer_id++;
         next_queue_position = (next_queue_position + 1) % 4;
-        state.write().source_configurations->config[0].buffer_queue_dirty.Assign(1);
-        state.write().source_configurations->config[0].enable = true;
-        state.write().source_configurations->config[0].enable_dirty.Assign(1);
+        for (int i = 0; i < 2; i++) {
+            state.write(i).source_configurations->config[0].buffer_queue_dirty.Assign(1);
+            state.write(i).source_configurations->config[0].enable = true;
+            state.write(i).source_configurations->config[0].enable_dirty.Assign(1);
+        }
 
         state.notifyDsp();
 
@@ -106,22 +114,30 @@ void SourceStatus() {
             state.waitForSync();
 
             if (!state.read().source_statuses->status[0].is_enabled) {
+                //ASSERT(!state.read(false).source_statuses->status[0].is_enabled);
                 printf("%zu !\n", frame_count);
-                state.write().source_configurations->config[0].enable = true;
-                state.write().source_configurations->config[0].enable_dirty.Assign(1);
+                state.write(true).source_configurations->config[0].enable = true;
+                state.write(true).source_configurations->config[0].enable_dirty.Assign(1);
+                state.write(false).source_configurations->config[0].enable = true;
+                state.write(false).source_configurations->config[0].enable_dirty.Assign(1);
             }
 
             if (state.read().source_statuses->status[0].current_buffer_id_dirty) {
+                //ASSERT(state.read(false).source_statuses->status[0].current_buffer_id_dirty);
                 printf("%zu %i (curr:%i)\n", frame_count, state.read().source_statuses->status[0].current_buffer_id, buffer_id+1);
                 if (state.read().source_statuses->status[0].current_buffer_id == buffer_id || state.read().source_statuses->status[0].current_buffer_id == 0) {
-                    state.write().source_configurations->config[0].buffers[next_queue_position].physical_address = osConvertVirtToPhys(buffer_id % 2 ? audio_buffer2 : audio_buffer);
-                    state.write().source_configurations->config[0].buffers[next_queue_position].length = NUM_SAMPLES;
-                    state.write().source_configurations->config[0].buffers[next_queue_position].adpcm_dirty = false;
-                    state.write().source_configurations->config[0].buffers[next_queue_position].is_looping = false;
-                    state.write().source_configurations->config[0].buffers[next_queue_position].buffer_id = ++buffer_id;
-                    state.write().source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
+                    //ASSERT(state.read(false).source_statuses->status[0].current_buffer_id == buffer_id || state.read(false).source_statuses->status[0].current_buffer_id == 0);
+                    for (int i = 0; i < 2; i++) {
+                        state.write(i).source_configurations->config[0].buffers[next_queue_position].physical_address = osConvertVirtToPhys(buffer_id % 2 ? audio_buffer2 : audio_buffer);
+                        state.write(i).source_configurations->config[0].buffers[next_queue_position].length = NUM_SAMPLES;
+                        state.write(i).source_configurations->config[0].buffers[next_queue_position].adpcm_dirty = false;
+                        state.write(i).source_configurations->config[0].buffers[next_queue_position].is_looping = false;
+                        state.write(i).source_configurations->config[0].buffers[next_queue_position].buffer_id = buffer_id;
+                        state.write(i).source_configurations->config[0].buffers_dirty |= 1 << next_queue_position;
+                        state.write(i).source_configurations->config[0].buffer_queue_dirty.Assign(1);
+                    }
+                    buffer_id++;
                     next_queue_position = (next_queue_position + 1) % 4;
-                    state.write().source_configurations->config[0].buffer_queue_dirty.Assign(1);
                 }
             }
 
@@ -133,16 +149,20 @@ void SourceStatus() {
             state.waitForSync();
 
             if (!state.read().source_statuses->status[0].is_enabled) {
+                //ASSERT(!state.read(false).source_statuses->status[0].is_enabled);
                 printf("%zu !\n", frame_count);
             }
 
             if (state.read().source_statuses->status[0].current_buffer_id_dirty) {
+                //ASSERT(state.read(false).source_statuses->status[0].current_buffer_id_dirty);
                 printf("%zu d\n", frame_count);
             }
 
             if (prev_read_bid != state.read().source_statuses->status[0].current_buffer_id) {
+                //ASSERT(prev_read_bid != state.read(false).source_statuses->status[0].current_buffer_id);
                 printf("%zu %i\n", frame_count, state.read().source_statuses->status[0].current_buffer_id);
                 prev_read_bid = state.read().source_statuses->status[0].current_buffer_id;
+                //ASSERT(prev_read_bid == state.read(false).source_statuses->status[0].current_buffer_id);
             }
 
             state.notifyDsp();
@@ -153,6 +173,8 @@ void SourceStatus() {
         state.waitForSync();
         state.write().source_configurations->config[0].sync = 2;
         state.write().source_configurations->config[0].sync_dirty.Assign(1);
+        state.write(false).source_configurations->config[0].sync = 2;
+        state.write(false).source_configurations->config[0].sync_dirty.Assign(1);
         state.notifyDsp();
 
         while (true) {
@@ -312,6 +334,6 @@ void InterpLinear() {
 }
 
 int main() {
-    InterpLinear();
+    SourceStatus();
     return 0;
 }

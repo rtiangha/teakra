@@ -1,6 +1,5 @@
 #pragma once
 #include "shared_memory.h"
-#pragma clang optimize off
 #include <utility>
 #include <atomic>
 #include <stdexcept>
@@ -14,7 +13,6 @@
 #include <bit>
 #include <set>
 #include "core_timing.h"
-#include "decoder.h"
 #include "memory_interface.h"
 #include "interpreter.h"
 #include "operand.h"
@@ -27,7 +25,7 @@ namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
 
-#define NOT_IMPLEMENTED() unimplemented = true
+#define NOT_IMPLEMENTED() UNREACHABLE()
 
 struct alignas(16) StackLayout {
     s64 cycles_remaining;
@@ -47,8 +45,6 @@ public:
     using BlockFunc = void(*)(JitRegisters*);
 
     struct BlockSwapState {
-        Cfg cfgi, cfgj;
-        u16 stepi0, stepj0;
         Mod0 mod0;
         Mod1 mod1;
         Mod2 mod2;
@@ -59,6 +55,10 @@ public:
     struct BlockKey {
         BlockSwapState curr;
         BlockSwapState shadow;
+        u16 stepi0, stepj0;
+        u16 stepi0b, stepj0b;
+        Cfg cfgi, cfgj;
+        Cfg cfgib, cfgjb;
         u32 pc;
         u32 sv;
     };
@@ -126,22 +126,29 @@ public:
         return reinterpret_cast<EmitX64*>(this_ptr)->LookupNewBlock();
     }
 
-    std::array<u32, 4> last_pc{};
-    int counter = 0;
-
     BlockFunc LookupNewBlock() {
+        if (cycles_remaining <= 0) {
+            return nullptr;
+        }
+
         // Lookup and compile next block
         blk_key.pc = regs.pc;
         blk_key.sv = regs.sv;
+
+        // State for bank exchange.
+        blk_key.cfgi = regs.cfgi;
+        blk_key.cfgj = regs.cfgj;
+        blk_key.cfgib = regs.cfgib;
+        blk_key.cfgjb = regs.cfgjb;
+        blk_key.stepi0 = regs.stepi0;
+        blk_key.stepj0 = regs.stepj0;
+        blk_key.stepi0b = regs.stepi0b;
+        blk_key.stepj0b = regs.stepj0b;
 
         // Current state
         blk_key.curr.mod0 = regs.mod0;
         blk_key.curr.mod1 = regs.mod1;
         blk_key.curr.mod2 = regs.mod2;
-        blk_key.curr.cfgi = regs.cfgi;
-        blk_key.curr.cfgj = regs.cfgj;
-        blk_key.curr.stepi0 = regs.stepi0;
-        blk_key.curr.stepj0 = regs.stepj0;
         blk_key.curr.ar = regs.ar;
         blk_key.curr.arp = regs.arp;
 
@@ -149,10 +156,6 @@ public:
         blk_key.shadow.mod0 = regs.mod0b;
         blk_key.shadow.mod1 = regs.mod1b;
         blk_key.shadow.mod2 = regs.mod2b;
-        blk_key.shadow.cfgi = regs.cfgib;
-        blk_key.shadow.cfgj = regs.cfgjb;
-        blk_key.shadow.stepi0 = regs.stepi0b;
-        blk_key.shadow.stepj0 = regs.stepj0b;
         blk_key.shadow.ar = regs.arb;
         blk_key.shadow.arp = regs.arpb;
 
@@ -164,12 +167,6 @@ public:
             // Note: They key may change during compilation, so this needs to be first.
             it->second.entry_key = blk_key;
             CompileBlock(it->second);
-        }
-
-        // Check if we have enough cycles to execute it
-        if (cycles_remaining < current_blk->cycles) {
-            //printf("Done slice\n");
-            return nullptr;
         }
 
         // Check if we are idle, and skip ahead
@@ -195,8 +192,6 @@ public:
         }
 
         // Return block function
-        last_pc[counter++] = regs.pc;
-        counter = counter % 4;
         return current_blk->func;
     }
 
@@ -270,17 +265,11 @@ public:
             decoder.call(*this, opcode, expand_value);
             blk.cycles++;
 
-            if (blk.cycles >= 1) {
-                if (compiling) {
-                    c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-                }
-                compiling = false;
-            }
-
             if (rep_end_locations.contains(current_pc)) {
                 Xbyak::Label end_label, jump_back_label;
                 c.cmp(word[REGS + offsetof(JitRegisters, repc)], 0);
                 c.jnz(jump_back_label);
+                c.mov(word[REGS + offsetof(JitRegisters, rep)], false);
                 c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc); // Loop done, move to next
                 c.jmp(end_label);
                 c.L(jump_back_label);
@@ -289,11 +278,6 @@ public:
                 c.L(end_label);
                 compiling = false;
             }
-
-            /*if (blk.cycles == 32 && compiling) {
-                c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-                compiling = false;
-            }*/
 
             if (bkrep_end_locations.contains(regs.pc - 1)) {
                 EmitBkrepReturn(regs.pc);
@@ -351,7 +335,7 @@ public:
     void EmitPushPC() {
         u16 l = (u16)(regs.pc & 0xFFFF);
         u16 h = (u16)(regs.pc >> 16);
-        const Reg16 sp = ax;
+        const Reg16 sp = bx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         c.sub(sp, 1);
         if (regs.cpc == 1) {
@@ -547,22 +531,102 @@ public:
     template <typename T>
     void LoadFromMemory(Reg64 out, T addr) {
         // TODO: Non MMIO reads can be performed inside the JIT.
-        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        // Push all registers because our JIT assumes everything is non volatile
+        c.push(rbp);
+        c.push(rbx);
+        c.push(rcx);
+        c.push(rdx);
+        c.push(rsi);
+        c.push(rdi);
+        c.push(r8);
+        c.push(r9);
+        c.push(r10);
+        c.push(r11);
+        c.push(r12);
+        c.push(r13);
+        c.push(r14);
+        c.push(r15);
+
+        c.mov(rbp, rsp);
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        c.sub(rsp, 64);
+        c.and_(rsp, ~0xF);
+
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        c.mov(ABI_PARAM2, addr);
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            c.movzx(ABI_PARAM2, addr.cvt16());
+        } else {
+            c.mov(ABI_PARAM2, addr & 0xFFFF);
+        }
         CallFarFunction(c, MemDataReadThunk);
-        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+
+        // Undo anything we did
+        c.mov(rsp, rbp);
+        c.pop(r15);
+        c.pop(r14);
+        c.pop(r13);
+        c.pop(r12);
+        c.pop(r11);
+        c.pop(r10);
+        c.pop(r9);
+        c.pop(r8);
+        c.pop(rdi);
+        c.pop(rsi);
+        c.pop(rdx);
+        c.pop(rcx);
+        c.pop(rbx);
+        c.pop(rbp);
         c.mov(out.cvt16(), ABI_RETURN.cvt16());
     }
 
     template <typename T>
     void LoadFromMemory(Xbyak::Address out, T addr) {
         // TODO: Non MMIO reads can be performed inside the JIT.
-        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+        // Push all registers because our JIT assumes everything is non volatile
+        c.push(rbp);
+        c.push(rbx);
+        c.push(rcx);
+        c.push(rdx);
+        c.push(rsi);
+        c.push(rdi);
+        c.push(r8);
+        c.push(r9);
+        c.push(r10);
+        c.push(r11);
+        c.push(r12);
+        c.push(r13);
+        c.push(r14);
+        c.push(r15);
+
+        c.mov(rbp, rsp);
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        c.sub(rsp, 64);
+        c.and_(rsp, ~0xF);
+
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        c.mov(ABI_PARAM2, addr);
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
+            c.movzx(ABI_PARAM2, addr.cvt16());
+        } else {
+            c.mov(ABI_PARAM2, addr & 0xFFFF);
+        }
         CallFarFunction(c, MemDataReadThunk);
-        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
+
+        // Undo anything we did
+        c.mov(rsp, rbp);
+        c.pop(r15);
+        c.pop(r14);
+        c.pop(r13);
+        c.pop(r12);
+        c.pop(r11);
+        c.pop(r10);
+        c.pop(r9);
+        c.pop(r8);
+        c.pop(rdi);
+        c.pop(rsi);
+        c.pop(rdx);
+        c.pop(rcx);
+        c.pop(rbx);
+        c.pop(rbp);
         c.mov(out, ABI_RETURN.cvt16());
     }
 
@@ -1392,7 +1456,8 @@ public:
         printf(fmt, value);
     }
 
-    void EmitPrint(Reg64 value, const char* fmt) {
+    template <typename T>
+    void EmitPrint(T value, const char* fmt) {
         c.push(rax);
         c.push(rbx);
         ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
@@ -1738,13 +1803,13 @@ public:
 
     void banke(BankFlags flags) {
         if (flags.Cfgi()) {
-            c.mov(word[REGS + offsetof(JitRegisters, cfgi)], blk_key.shadow.cfgi.raw);
-            c.mov(word[REGS + offsetof(JitRegisters, cfgib)], blk_key.curr.cfgi.raw);
-            std::swap(blk_key.curr.cfgi, blk_key.shadow.cfgi);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgi)], blk_key.cfgib.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgib)], blk_key.cfgi.raw);
+            std::swap(blk_key.cfgi, blk_key.cfgib);
             if (blk_key.curr.mod1.stp16) {
-                c.mov(word[REGS + offsetof(JitRegisters, stepi0)], blk_key.shadow.stepi0);
-                c.mov(word[REGS + offsetof(JitRegisters, stepi0b)], blk_key.curr.stepi0);
-                std::swap(blk_key.curr.stepi0, blk_key.shadow.stepi0);
+                c.mov(word[REGS + offsetof(JitRegisters, stepi0)], blk_key.stepi0b);
+                c.mov(word[REGS + offsetof(JitRegisters, stepi0b)], blk_key.stepi0);
+                std::swap(blk_key.stepi0, blk_key.stepi0b);
             }
         }
         if (flags.R4()) {
@@ -1764,13 +1829,13 @@ public:
             c.rorx(R4_5_6_7, R4_5_6_7, 16);
         }
         if (flags.Cfgj()) {
-            c.mov(word[REGS + offsetof(JitRegisters, cfgj)], blk_key.shadow.cfgj.raw);
-            c.mov(word[REGS + offsetof(JitRegisters, cfgjb)], blk_key.curr.cfgj.raw);
-            std::swap(blk_key.curr.cfgj, blk_key.shadow.cfgj);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgj)], blk_key.cfgjb.raw);
+            c.mov(word[REGS + offsetof(JitRegisters, cfgjb)], blk_key.cfgj.raw);
+            std::swap(blk_key.cfgj, blk_key.cfgjb);
             if (blk_key.curr.mod1.stp16) {
-                c.mov(word[REGS + offsetof(JitRegisters, stepj0)], blk_key.shadow.stepj0);
-                c.mov(word[REGS + offsetof(JitRegisters, stepj0b)], blk_key.curr.stepj0);
-                std::swap(blk_key.curr.stepj0, blk_key.shadow.stepj0);
+                c.mov(word[REGS + offsetof(JitRegisters, stepj0)], blk_key.stepj0b);
+                c.mov(word[REGS + offsetof(JitRegisters, stepj0b)], blk_key.stepj0);
+                std::swap(blk_key.stepj0, blk_key.stepj0b);
             }
         }
     }
@@ -1953,7 +2018,7 @@ public:
         c.and_(ax, ~decltype(Cfg::step)::mask);
         c.or_(ax, stepi);
         c.mov(word[REGS + offsetof(JitRegisters, cfgi)], ax);
-        blk_key.curr.cfgi.step.Assign(stepi);
+        blk_key.cfgi.step.Assign(stepi);
     }
     void load_stepj(Imm7s a) {
         const u8 stepj = static_cast<u8>(a.Signed16() & 0x7F);
@@ -1961,7 +2026,7 @@ public:
         c.and_(ax, ~decltype(Cfg::step)::mask);
         c.or_(ax, stepj);
         c.mov(word[REGS + offsetof(JitRegisters, cfgj)], ax);
-        blk_key.curr.cfgj.step.Assign(stepj);
+        blk_key.cfgj.step.Assign(stepj);
     }
     void load_page(Imm8 a) {
         const u8 page = static_cast<u8>(a.Unsigned16());
@@ -1973,14 +2038,14 @@ public:
         c.and_(rax, ~decltype(Cfg::mod)::mask);
         c.or_(rax, a.Unsigned16() << decltype(Cfg::mod)::position);
         c.mov(word[REGS + offsetof(JitRegisters, cfgi)], ax);
-        blk_key.curr.cfgi.mod.Assign(a.Unsigned16());
+        blk_key.cfgi.mod.Assign(a.Unsigned16());
     }
     void load_modj(Imm9 a) {
         c.mov(ax, word[REGS + offsetof(JitRegisters, cfgj)]);
         c.and_(rax, ~decltype(Cfg::mod)::mask);
         c.or_(rax, a.Unsigned16() << decltype(Cfg::mod)::position);
         c.mov(word[REGS + offsetof(JitRegisters, cfgj)], ax);
-        blk_key.curr.cfgj.mod.Assign(a.Unsigned16());
+        blk_key.cfgj.mod.Assign(a.Unsigned16());
     }
     void load_movpd(Imm2 a) {
         c.mov(word[REGS + offsetof(JitRegisters, pcmhi)], a.Unsigned16());
@@ -2262,7 +2327,7 @@ public:
     }
 
     void rep(Imm8 a) {
-        u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        /*u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         auto& decoder = decoders[opcode];
         u16 expand_value = 0;
         if (decoder.NeedExpansion()) {
@@ -2273,11 +2338,18 @@ public:
             decoder.call(*this, opcode, expand_value);
             current_blk->cycles++;
             ASSERT(compiling); // Ensure the instruction doesn't break the block
-        }
+        }*/
+
+        c.mov(word[REGS + offsetof(JitRegisters, rep)], true);
+        c.mov(word[REGS + offsetof(JitRegisters, repc)], a.Unsigned16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        compiling = false;
+        rep_end_locations.insert(regs.pc);
     }
     void rep(Register a) {
         const Reg64 value = rax;
         RegToBus16(a.GetName(), value);
+        c.mov(word[REGS + offsetof(JitRegisters, rep)], true);
         c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         compiling = false;
@@ -2511,6 +2583,7 @@ public:
     }
 
     void ProgramRead(Reg64 out, Reg64 address) {
+        c.movzx(address, address.cvt16());
         c.mov(out, reinterpret_cast<uintptr_t>(mem.GetMemory().raw.data()));
         c.movzx(out, word[out + address * 2]);
     }
@@ -2569,12 +2642,52 @@ public:
     template <typename T1, typename T2>
     void StoreToMemory(T1 addr, T2 value) {
         // TODO: Non MMIO writes can be performed inside the JIT.
-        ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 0);
+        // Push all registers because our JIT assumes everything is non volatile
+        c.push(rbp);
+        c.push(rbx);
+        c.push(rcx);
+        c.push(rdx);
+        c.push(rsi);
+        c.push(rdi);
+        c.push(r8);
+        c.push(r9);
+        c.push(r10);
+        c.push(r11);
+        c.push(r12);
+        c.push(r13);
+        c.push(r14);
+        c.push(r15);
+
+        c.mov(rbp, rsp);
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        c.sub(rsp, 64);
+        c.and_(rsp, ~0xF);
+
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        c.mov(ABI_PARAM2, addr);
+        if constexpr (std::is_base_of_v<Xbyak::Reg, T1>) {
+            c.movzx(ABI_PARAM2, addr.cvt16());
+        } else {
+            c.mov(ABI_PARAM2, addr);
+        }
         c.mov(ABI_PARAM3, value);
         CallFarFunction(c, MemDataWriteThunk);
-        ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 0);
+
+        // Undo anything we did
+        c.mov(rsp, rbp);
+        c.pop(r15);
+        c.pop(r14);
+        c.pop(r13);
+        c.pop(r12);
+        c.pop(r11);
+        c.pop(r10);
+        c.pop(r9);
+        c.pop(r8);
+        c.pop(rdi);
+        c.pop(rsi);
+        c.pop(rdx);
+        c.pop(rcx);
+        c.pop(rbx);
+        c.pop(rbp);
     }
 
     void mov(Ablh a, MemImm8 b) {
@@ -2784,12 +2897,12 @@ public:
     void mov_stepi0(Imm16 a) {
         u16 value = a.Unsigned16();
         c.mov(word[REGS + offsetof(JitRegisters, stepi0)], value);
-        blk_key.curr.stepi0 = value;
+        blk_key.stepi0 = value;
     }
     void mov_stepj0(Imm16 a) {
         u16 value = a.Unsigned16();
         c.mov(word[REGS + offsetof(JitRegisters, stepj0)], value);
-        blk_key.curr.stepj0 = value;
+        blk_key.stepj0 = value;
     }
     void mov(Imm16 a, SttMod b) {
         const u16 value = a.Unsigned16();
@@ -2814,10 +2927,10 @@ public:
         compiling = false;
     }
     void mov_stepi0_a0h() {
-        RegFromBus16(RegName::a0h, blk_key.curr.stepi0);
+        RegFromBus16(RegName::a0h, blk_key.stepi0);
     }
     void mov_stepj0_a0h() {
-        RegFromBus16(RegName::a0h, blk_key.curr.stepj0);
+        RegFromBus16(RegName::a0h, blk_key.stepj0);
     }
 
     void mov_prpage(Abl a) {
@@ -3098,6 +3211,18 @@ public:
         NOT_IMPLEMENTED();
     }
 
+    template <typename T>
+    void Exp(Reg64 value, T count) {
+        c.mov(rsi, value);
+        c.not_(rsi);
+        c.bt(value, 39);
+        c.cmovc(value, rsi);
+        c.shl(value, 64 - 39);
+        c.or_(value, 0x1FFFFFF);
+        c.lzcnt(count, value);
+        c.sub(count, 8);
+    }
+
     void exp(Bx a) {
         NOT_IMPLEMENTED();
     }
@@ -3111,7 +3236,20 @@ public:
         NOT_IMPLEMENTED();
     }
     void exp(Register a) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        if (a.GetName() == RegName::a0 || a.GetName() == RegName::a1) {
+            GetAcc(value, a.GetName());
+        } else {
+            // RegName::p follows the usual rule
+            RegToBus16(a.GetName(), value);
+            c.shl(value, 16);
+            SignExtend(value, 32);
+        }
+        const Reg64 count = rbx;
+        Exp(value, count);
+        c.mov(word[REGS + offsetof(JitRegisters, sv)], count.cvt16());
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        compiling = false;
     }
     void exp(Register a, Ax b) {
         NOT_IMPLEMENTED();
@@ -3647,10 +3785,10 @@ private:
             break;
 
         case RegName::cfgi:
-            c.mov(out, blk_key.curr.cfgi.raw);
+            c.mov(out, blk_key.cfgi.raw);
             break;
         case RegName::cfgj:
-            c.mov(out, blk_key.curr.cfgj.raw);
+            c.mov(out, blk_key.cfgj.raw);
             break;
 
         case RegName::mod0:
@@ -4006,11 +4144,11 @@ private:
             break;
 
         case RegName::cfgi:
-            blk_key.curr.cfgi.raw = value;
+            blk_key.cfgi.raw = value;
             regs.SetCfgi(c, value);
             break;
         case RegName::cfgj:
-            blk_key.curr.cfgj.raw = value;
+            blk_key.cfgj.raw = value;
             regs.SetCfgj(c, value);
             break;
 
@@ -4277,7 +4415,7 @@ private:
             return;
         }
         const bool emod = blk_key.curr.mod2.IsM(unit) && !blk_key.curr.mod2.IsBr(unit) && !dmod;
-        u16 mod = unit < 4 ? blk_key.curr.cfgi.mod : blk_key.curr.cfgj.mod;
+        u16 mod = unit < 4 ? blk_key.cfgi.mod : blk_key.cfgj.mod;
         [[maybe_unused]]u16 mask = 1; // mod = 0 still have one bit mask
         for (u32 i = 0; i < 9; ++i) {
             mask |= mod >> i;
@@ -4342,9 +4480,9 @@ private:
             break;
         case StepValue::PlusStep: {
             if (blk_key.curr.mod2.IsBr(unit) && !blk_key.curr.mod2.IsM(unit)) {
-                s = unit < 4 ? blk_key.curr.stepi0 : blk_key.curr.stepj0;
+                s = unit < 4 ? blk_key.stepi0 : blk_key.stepj0;
             } else {
-                s = unit < 4 ? blk_key.curr.cfgi.step : blk_key.curr.cfgj.step;
+                s = unit < 4 ? blk_key.cfgi.step : blk_key.cfgj.step;
                 s = ::SignExtend<7>(s);
             }
             if (blk_key.curr.mod1.stp16 == 1 && !legacy) {
@@ -4362,7 +4500,7 @@ private:
         if (s == 0)
             return;
         if (!dmod && !blk_key.curr.mod2.IsBr(unit) && blk_key.curr.mod2.IsM(unit)) {
-            u16 mod = unit < 4 ? blk_key.curr.cfgi.mod : blk_key.curr.cfgj.mod;
+            u16 mod = unit < 4 ? blk_key.cfgi.mod : blk_key.cfgj.mod;
 
             if (mod == 0) {
                 return;

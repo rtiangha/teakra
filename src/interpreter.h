@@ -62,30 +62,28 @@ public:
     s32 total_cycles = 0;
 
     void Run(u64 cycles) {
+        if (idle) {
+            u64 skipped = core_timing.Skip(total_cycles - 1);
+            total_cycles -= skipped;
+
+            // Skip additional tick so to let components fire interrupts
+            if (total_cycles > 1) {
+                total_cycles--;
+                core_timing.Tick();
+            }
+        }
+
+        for (std::size_t i = 0; i < 3; ++i) {
+            if (interrupt_pending[i].exchange(false)) {
+                regs.ip[i] = 1;
+            }
+        }
+
+        if (vinterrupt_pending.exchange(false)) {
+            regs.ipv = 1;
+        }
+
         for (u64 i = 0; i < cycles; ++i) {
-            if (idle) {
-                u64 skipped = core_timing.Skip(total_cycles - 1);
-                i += skipped;
-                total_cycles -= skipped;
-
-                // Skip additional tick so to let components fire interrupts
-                if (total_cycles > 1) {
-                    ++i;
-                    total_cycles--;
-                    core_timing.Tick();
-                }
-            }
-
-            for (std::size_t i = 0; i < 3; ++i) {
-                if (interrupt_pending[i].exchange(false)) {
-                    regs.ip[i] = 1;
-                }
-            }
-
-            if (vinterrupt_pending.exchange(false)) {
-                regs.ipv = 1;
-            }
-
             //std::printf("PC 0x%x\n", regs.pc);
             u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
             auto& decoder = decoders[opcode];
@@ -114,40 +112,40 @@ public:
             }
 
             decoder.call(*this, opcode, expand_value);
+        }
 
-            // I am not sure if a single-instruction loop is interruptable and how it is handled,
-            // so just disable interrupt for it for now.
-            if (regs.ie && !regs.rep) {
-                bool interrupt_handled = false;
-                for (u32 i = 0; i < regs.im.size(); ++i) {
-                    if (regs.im[i] && regs.ip[i]) {
-                        regs.ip[i] = 0;
-                        regs.ie = 0;
-                        PushPC();
-                        regs.pc = 0x0006 + i * 8;
-                        idle = false;
-                        interrupt_handled = true;
-                        if (regs.ic[i]) {
-                            ContextStore();
-                        }
-                        break;
-                    }
-                }
-                if (!interrupt_handled && regs.imv && regs.ipv) {
-                    regs.ipv = 0;
+               // I am not sure if a single-instruction loop is interruptable and how it is handled,
+               // so just disable interrupt for it for now.
+        if (regs.ie && !regs.rep) {
+            bool interrupt_handled = false;
+            for (u32 i = 0; i < regs.im.size(); ++i) {
+                if (regs.im[i] && regs.ip[i]) {
+                    regs.ip[i] = 0;
                     regs.ie = 0;
                     PushPC();
-                    regs.pc = vinterrupt_address;
+                    regs.pc = 0x0006 + i * 8;
                     idle = false;
-                    if (vinterrupt_context_switch) {
+                    interrupt_handled = true;
+                    if (regs.ic[i]) {
                         ContextStore();
                     }
+                    break;
                 }
             }
-
-            core_timing.Tick();
-            total_cycles--;
+            if (!interrupt_handled && regs.imv && regs.ipv) {
+                regs.ipv = 0;
+                regs.ie = 0;
+                PushPC();
+                regs.pc = vinterrupt_address;
+                idle = false;
+                if (vinterrupt_context_switch) {
+                    ContextStore();
+                }
+            }
         }
+
+        core_timing.Tick(cycles);
+        total_cycles -= cycles;
     }
 
     void SignalInterrupt(u32 i) {

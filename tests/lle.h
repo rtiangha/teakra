@@ -345,5 +345,5 @@ public:
     std::unique_ptr<u8[]> fcram;
 
     static constexpr u32 DspDataOffset = 0x40000;
-    static constexpr u32 TeakraSlice = 16384 * 2;
+    static constexpr u32 TeakraSlice = 16384;
 };
