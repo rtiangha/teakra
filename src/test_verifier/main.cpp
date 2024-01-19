@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
                 i++;
                 continue;
             }*/
-            if (i == 82648) {
+            if (i == 39047) {
                 printf("bad\n");
             }
             //interpreter.Run(1);

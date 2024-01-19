@@ -23,7 +23,7 @@
 
 namespace Teakra {
 
-constexpr size_t MAX_CODE_SIZE = 32 * 1024 * 1024;
+constexpr size_t MAX_CODE_SIZE = 256 * 1024 * 1024;
 
 #define NOT_IMPLEMENTED() UNREACHABLE()
 
@@ -45,22 +45,22 @@ public:
     using BlockFunc = void(*)(JitRegisters*);
 
     struct BlockSwapState {
-        Mod0 mod0;
-        Mod1 mod1;
-        Mod2 mod2;
-        std::array<ArpU, 4> arp;
-        std::array<ArU, 2> ar;
+        Mod0 mod0{};
+        Mod1 mod1{};
+        Mod2 mod2{};
+        std::array<ArpU, 4> arp{};
+        std::array<ArU, 2> ar{};
+        u16 pad{};
     };
 
     struct BlockKey {
-        BlockSwapState curr;
-        BlockSwapState shadow;
+        BlockSwapState curr{};
+        BlockSwapState shadow{};
         u16 stepi0, stepj0;
         u16 stepi0b, stepj0b;
         Cfg cfgi, cfgj;
         Cfg cfgib, cfgjb;
         u32 pc;
-        u32 sv;
     };
 
     struct Block {
@@ -75,15 +75,14 @@ public:
     MemoryInterface& mem;
     Interpreter* debug_interp;
     Xbyak::CodeGenerator c;
-    std::array<u8, 0x1000> pad;
     s32 cycles_remaining;
     Xbyak::Label block_exit;
     const std::vector<Matcher<EmitX64>> decoders = GetDecoderTable<EmitX64>();
     std::set<u32> bkrep_end_locations;
     std::set<u32> rep_end_locations;
     bool compiling = false;
-    std::unordered_map<size_t, Block> code_blocks;
-    Block* current_blk{};
+    std::unordered_map<size_t, Block, std::identity> code_blocks;
+    const Block* current_blk{};
     BlockKey blk_key{};
     bool unimplemented = false;
 
@@ -105,7 +104,7 @@ public:
         Xbyak::Label dispatcher_start, dispatcher_end;
         c.L(dispatcher_start);
 
-        // Call LookupBlock. This will compile a new block and increment timers for us
+               // Call LookupBlock. This will compile a new block and increment timers for us
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
         CallFarFunction(c, LookupNewBlockThunk);
         c.test(ABI_RETURN, ABI_RETURN);
@@ -126,38 +125,51 @@ public:
         return reinterpret_cast<EmitX64*>(this_ptr)->LookupNewBlock();
     }
 
+    int count = 0;
+
     BlockFunc LookupNewBlock() {
         if (cycles_remaining <= 0) {
             return nullptr;
         }
 
-        // Lookup and compile next block
+               // Lookup and compile next block
         blk_key.pc = regs.pc;
-        blk_key.sv = regs.sv;
 
-        // State for bank exchange.
-        blk_key.cfgi = regs.cfgi;
-        blk_key.cfgj = regs.cfgj;
-        blk_key.cfgib = regs.cfgib;
-        blk_key.cfgjb = regs.cfgjb;
+               // State for bank exchange.
+        blk_key.cfgi.raw = regs.cfgi.raw & Cfg::Mask();
+        blk_key.cfgj.raw = regs.cfgj.raw & Cfg::Mask();
+        blk_key.cfgib.raw = regs.cfgib.raw & Cfg::Mask();
+        blk_key.cfgjb.raw = regs.cfgjb.raw & Cfg::Mask();
         blk_key.stepi0 = regs.stepi0;
         blk_key.stepj0 = regs.stepj0;
         blk_key.stepi0b = regs.stepi0b;
         blk_key.stepj0b = regs.stepj0b;
 
-        // Current state
-        blk_key.curr.mod0 = regs.mod0;
-        blk_key.curr.mod1 = regs.mod1;
-        blk_key.curr.mod2 = regs.mod2;
+               // Current state
+        blk_key.curr.mod0.raw = regs.mod0.raw & Mod0::Mask();
+        blk_key.curr.mod1.raw = regs.mod1.raw & Mod1::Mask();
+        blk_key.curr.mod2.raw = regs.mod2.raw;
         blk_key.curr.ar = regs.ar;
+        for (size_t i = 0; i < blk_key.curr.ar.size(); i++) {
+            blk_key.curr.ar[i].raw &= ArU::Mask();
+        }
         blk_key.curr.arp = regs.arp;
+        for (size_t i = 0; i < blk_key.curr.arp.size(); i++) {
+            blk_key.curr.arp[i].raw &= ArpU::Mask();
+        }
 
-        // Shadow state.
-        blk_key.shadow.mod0 = regs.mod0b;
-        blk_key.shadow.mod1 = regs.mod1b;
+               // Shadow state.
+        blk_key.shadow.mod0.raw = regs.mod0b.raw & Mod0::Mask();
+        blk_key.shadow.mod1.raw = regs.mod1b.raw & Mod1::Mask();
         blk_key.shadow.mod2 = regs.mod2b;
         blk_key.shadow.ar = regs.arb;
+        for (size_t i = 0; i < blk_key.shadow.ar.size(); i++) {
+            blk_key.shadow.ar[i].raw &= ArU::Mask();
+        }
         blk_key.shadow.arp = regs.arpb;
+        for (size_t i = 0; i < blk_key.shadow.arp.size(); i++) {
+            blk_key.shadow.arp[i].raw &= ArpU::Mask();
+        }
 
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
@@ -165,11 +177,12 @@ public:
 
         if (new_block) {
             // Note: They key may change during compilation, so this needs to be first.
-            it->second.entry_key = blk_key;
-            CompileBlock(it->second);
+            auto& blk = it->second;
+            blk.entry_key = blk_key;
+            CompileBlock(blk);
         }
 
-        // Check if we are idle, and skip ahead
+               // Check if we are idle, and skip ahead
         if (regs.idle) {
             u64 skipped = core_timing.Skip(cycles_remaining - 1);
             cycles_remaining -= skipped;
@@ -180,7 +193,7 @@ public:
             }
         }
 
-        // Check for interrupts.
+               // Check for interrupts.
         for (std::size_t i = 0; i < 3; ++i) {
             if (interrupt_pending[i].exchange(false)) {
                 regs.ip[i] = 1;
@@ -191,7 +204,7 @@ public:
             regs.ipv = 1;
         }
 
-        // Return block function
+               // Return block function
         return current_blk->func;
     }
 
@@ -228,15 +241,15 @@ public:
             }
         }
 
-        // Count the cycles of the previous executed block.
+               // Count the cycles of the previous executed block.
         core_timing.Tick(current_blk->cycles);
         cycles_remaining -= current_blk->cycles;
 
-        // DEBUG: Run interpreter before running block. We will compare register
-        // state when the dispatcher is re-entered to ensure JIT was correct.
-        //debug_interp->Run(current_blk->cycles);
-        //ASSERT(cycles_remaining == debug_interp->total_cycles);
-        //CompareRegisterState();
+               // DEBUG: Run interpreter before running block. We will compare register
+               // state when the dispatcher is re-entered to ensure JIT was correct.
+               //debug_interp->Run(current_blk->cycles);
+               //ASSERT(cycles_remaining == debug_interp->total_cycles);
+               //CompareRegisterState();
     }
 
     void CompileBlock(Block& blk) {
@@ -284,7 +297,7 @@ public:
             }
         }
 
-        // Flush block state
+               // Flush block state
         c.mov(qword[REGS + offsetof(JitRegisters, r)], R0_1_2_3);
         c.mov(qword[REGS + offsetof(JitRegisters, r) + sizeof(u16) * 4], R4_5_6_7);
         c.mov(qword[REGS + offsetof(JitRegisters, y)], FACTORS);
@@ -560,7 +573,7 @@ public:
         }
         CallFarFunction(c, MemDataReadThunk);
 
-        // Undo anything we did
+               // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
@@ -611,7 +624,7 @@ public:
         }
         CallFarFunction(c, MemDataReadThunk);
 
-        // Undo anything we did
+               // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
@@ -1377,11 +1390,12 @@ public:
             } else {
                 if (blk_key.curr.mod0.s == 0) {
                     // TODO: This can probably be done better
-                    c.mov(rcx, value);
                     c.mov(rdx, value);
+                    c.mov(rcx, value);
                     SignExtend(rcx, 40);
                     SignExtend(rdx, 40 - sv);
-                    // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
+
+                           // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
                     c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
                     c.cmp(rcx, rdx);
                     c.setne(cl); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv) ? 1 : 0
@@ -1435,6 +1449,141 @@ public:
         SetAccFlag(value);
         if (blk_key.curr.mod0.s == 0 && blk_key.curr.mod0.sata == 0) {
 
+            Xbyak::Label end_label, saturate_label;
+            c.bt(FLAGS, decltype(Flags::fv)::position);
+            c.jc(saturate_label);
+            c.movsxd(rcx, value.cvt32());
+            c.cmp(rcx, value);
+            c.je(end_label);
+            c.L(saturate_label);
+            c.or_(FLAGS, decltype(Flags::flm)::mask);
+            c.mov(value, 0x7FFF'FFFF);
+            c.mov(rcx, 0xFFFF'FFFF'8000'0000);
+            c.cmp(original_sign, 1);
+            c.cmove(value, rcx);
+            c.L(end_label);
+        }
+        SetAcc(dest, value);
+    }
+
+    void ShiftBus40(Reg64 value, Reg16 sv, RegName dest) {
+        ASSERT(sv.getIdx() == Xbyak::Operand::CL);
+        c.xor_(rsi, rsi);
+        c.mov(rbx, 0xFF'FFFF'FFFF);
+        c.and_(value, rbx);
+        const Reg64 original_sign = rbx;
+        c.mov(original_sign, value);
+        c.shr(original_sign, 39);
+        Xbyak::Label end_label, right_shift;
+        c.bt(sv, 15);
+        c.jc(right_shift);
+        // left shift
+        Xbyak::Label normal_shift, end_left_shift;
+        c.cmp(sv, 40);
+        c.jl(normal_shift);
+        if (blk_key.curr.mod0.s == 0) {
+            // regs.fv = value != 0;
+            c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
+            c.test(value, value);
+            c.setne(sil); // u32 mask = (value != 0) ? 1 : 0
+            c.shl(si, decltype(Flags::fv)::position); // mask <<= fv_pos
+            c.or_(FLAGS, si); // flags |= mask
+            // if (regs.fv) {
+            //    regs.fvl = 1;
+            // }
+            static_assert(decltype(Flags::fv)::position - decltype(Flags::fvl)::position == 3);
+            // mask is either 0 or 1. If it was 0, then the or_ wont have any effect.
+            // If it was 1, it will set fvl, which is what we want.
+            c.shr(si, 3); // mask >>= 3;
+            c.or_(FLAGS, si);
+        }
+        c.xor_(value, value); // value = 0;
+        c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
+        c.jmp(end_left_shift);
+        c.L(normal_shift);
+        if (blk_key.curr.mod0.s == 0) {
+            // TODO: This can probably be done better
+            // rdx = SignExtend(value, 40 - sv);
+            c.mov(rdx, value);
+            c.add(sv, 24);
+            c.shl(rdx, sv.cvt8());
+            c.sar(rdx, sv.cvt8());
+            c.sub(sv, 24);
+
+                   // rcx = SignExtend(value, 40);
+            c.mov(rsi, value);
+            SignExtend(rsi, 40);
+
+                   // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
+            c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
+            c.cmp(rsi, rdx);
+            c.setne(sil); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv) ? 1 : 0
+            c.shl(si, decltype(Flags::fv)::position); // mask <<= fv_pos
+            c.or_(FLAGS.cvt8(), si); // flags |= mask
+            // if (regs.fv) {
+            //     regs.fvl = 1;
+            // }
+            c.shr(si, 3); // mask >>= 3;
+            c.or_(FLAGS.cvt8(), si);
+        }
+        c.shl(value, sv.cvt8()); // value <<= sv;
+        // regs.fc0 = (value & ((u64)1 << 40)) != 0;
+        c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
+        c.bt(value, 40);
+        c.setc(sil); // u32 mask = (value & ((u64)1 << 40));
+        c.shl(si, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
+        c.or_(FLAGS.cvt8(), si);
+        c.L(end_left_shift);
+        c.jmp(end_label);
+        c.L(right_shift);
+        // right shift
+        const Reg16 nsv = sv;
+        c.not_(nsv);
+        c.add(nsv, 1);
+        Xbyak::Label normal_right_shift, end_right_shift;
+        c.cmp(nsv, 40);
+        c.jl(normal_right_shift);
+        if (blk_key.curr.mod0.s == 0) {
+            c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
+            c.bt(value, 39);
+            c.setc(sil);
+            c.shl(sil, decltype(Flags::fc0)::position);
+            c.or_(FLAGS.cvt8(), sil);
+            // regs.fc0 = (value >> 39) & 1;
+            c.shl(value, 64 - 40);
+            c.sar(value, 63);
+            // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
+        } else {
+            c.xor_(value, value); // value = 0;
+            c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
+        }
+        c.jmp(end_right_shift);
+        c.L(normal_right_shift);
+        // regs.fc0 = (value & ((u64)1 << (nsv - 1))) != 0;
+        c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
+        c.sub(nsv, 1);
+        c.bt(value, nsv.cvt64());
+        c.setc(sil); // u32 mask = (value & ((u64)1 << (nsv - 1)));
+        c.shl(si, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
+        c.or_(FLAGS, si);
+        c.add(nsv, 1);
+        c.shr(value, nsv.cvt8()); // value >>= nsv;
+        if (blk_key.curr.mod0.s == 0) {
+            c.add(nsv, 24);
+            c.shl(value, nsv.cvt8());
+            c.sar(value, nsv.cvt8());
+            c.sub(nsv, 24);
+        }
+        c.L(end_right_shift);
+
+        if (blk_key.curr.mod0.s == 0) {
+            c.and_(FLAGS, ~decltype(Flags::fv)::mask); // regs.fv = 0;
+        }
+        c.L(end_label);
+
+        SignExtend(value, 40);
+        SetAccFlag(value);
+        if (blk_key.curr.mod0.s == 0 && blk_key.curr.mod0.sata == 0) {
             Xbyak::Label end_label, saturate_label;
             c.bt(FLAGS, decltype(Flags::fv)::position);
             c.jc(saturate_label);
@@ -1701,8 +1850,9 @@ public:
         std::copy(regs->bkrep_stack.begin() + 1, regs->bkrep_stack.begin() + regs->bcn,
                   regs->bkrep_stack.begin());
         --regs->bcn;
-        if (regs->bcn == 0)
+        if (regs->bcn == 0) {
             regs->lp = 0;
+        }
     }
 
     static void DoBkrepStackCopyThunkRestore(JitRegisters* regs) {
@@ -1723,7 +1873,7 @@ public:
         c.jz(not_in_loop);
         ABI_PushRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
         c.mov(ABI_PARAM1, REGS);
-        CallFarFunction(c, DoBkrepStackCopyThunk);
+        CallFarFunction(c, DoBkrepStackCopyThunkRestore);
         ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLER_SAVED_GPR, 8);
         c.jmp(end_label);
         c.L(not_in_loop);
@@ -1945,9 +2095,9 @@ public:
         regs.ShadowSwap(c);
         std::swap(blk_key.curr, blk_key.shadow);
 
-        // if (!regs.crep) {
-        //     regs.repc = regs.repcs;
-        // }
+               // if (!regs.crep) {
+               //     regs.repc = regs.repcs;
+               // }
         c.mov(ax, word[REGS + offsetof(JitRegisters, repc)]);
         c.test(word[REGS + offsetof(JitRegisters, crep)], 0x1);
         c.cmovz(ax, word[REGS + offsetof(JitRegisters, repcs)]);
@@ -2334,11 +2484,11 @@ public:
             expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         }
 
-        for (int i = 0; i <= a.Unsigned16(); i++) {
-            decoder.call(*this, opcode, expand_value);
-            current_blk->cycles++;
-            ASSERT(compiling); // Ensure the instruction doesn't break the block
-        }*/
+         for (int i = 0; i <= a.Unsigned16(); i++) {
+             decoder.call(*this, opcode, expand_value);
+             current_blk->cycles++;
+             ASSERT(compiling); // Ensure the instruction doesn't break the block
+         }*/
 
         c.mov(word[REGS + offsetof(JitRegisters, rep)], true);
         c.mov(word[REGS + offsetof(JitRegisters, repc)], a.Unsigned16());
@@ -2365,7 +2515,9 @@ public:
         ConditionPass(cond, [&] {
             const Reg64 value = rax;
             GetAcc(value, a.GetName());
-            ShiftBus40(value, blk_key.sv, b.GetName());
+            const Reg16 sv = cx;
+            c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
+            ShiftBus40(value, sv, b.GetName());
         });
     }
     void shfi(Ab a, Ab b, Imm6s s) {
@@ -2493,7 +2645,15 @@ public:
         MulGeneric(op.GetName(), a);
     }
     void mul(Mul3 op, R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
-        NOT_IMPLEMENTED();
+        const Reg64 address_y = rax;
+        const Reg64 address_x = rbx;
+        RnAddressAndModify(y.Index(), ys.GetName(), address_y);
+        RnAddressAndModify(x.Index(), xs.GetName(), address_x);
+        LoadFromMemory(FACTORS, address_y);
+        c.rorx(FACTORS, FACTORS, 32);
+        LoadFromMemory(FACTORS, address_x);
+        c.rorx(FACTORS, FACTORS, 32);
+        MulGeneric(op.GetName(), a);
     }
     void mul_y0_r6(Mul3 op, Ax a) {
         NOT_IMPLEMENTED();
@@ -2672,7 +2832,7 @@ public:
         c.mov(ABI_PARAM3, value);
         CallFarFunction(c, MemDataWriteThunk);
 
-        // Undo anything we did
+               // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
@@ -2739,8 +2899,6 @@ public:
         const Reg64 value = rbx;
         LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
         c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        compiling = false; // Static state changed, end block
     }
     void mov_dvm_to(Ab b) {
         NOT_IMPLEMENTED();
@@ -2768,7 +2926,6 @@ public:
     }
     void mov_sv(Imm8s a) {
         const u16 value = a.Signed16();
-        blk_key.sv = value;
         c.mov(word[REGS + offsetof(JitRegisters, sv)], value);
     }
     void mov(Imm8 a, Axl b) {
@@ -2867,7 +3024,7 @@ public:
         NOT_IMPLEMENTED();
     }
     void mov_sv_to(MemImm8 b) {
-        StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), blk_key.sv);
+        StoreToMemory(b.Unsigned16() + (blk_key.curr.mod1.page << 8), word[REGS + offsetof(JitRegisters, sv)]);
     }
     void mov_x0_to(Ab b) {
         NOT_IMPLEMENTED();
@@ -3136,7 +3293,21 @@ public:
         NOT_IMPLEMENTED();
     }
     void mov2_abh_m(Abh ax, Abh ay, ArRn1 b, ArStep1 bs) {
-        NOT_IMPLEMENTED();
+        const Reg64 u = rbx;
+        const Reg64 v = rax;
+        GetAndSatAccNoFlag(u, ax.GetName());
+        c.shr(u, 16);
+        GetAndSatAccNoFlag(v, ay.GetName());
+        c.shr(v, 16);
+        u16 unit = GetArRnUnit(b);
+        const Reg64 ua = rcx;
+        RnAddressAndModify(unit, GetArStep(bs), ua);
+        const Reg64 va = rdx;
+        c.mov(va, ua);
+        OffsetAddress(unit, va.cvt16(), GetArOffset(bs));
+        // keep the order
+        StoreToMemory(va, v);
+        StoreToMemory(ua, u);
     }
     void exchange_iaj(Axh a, ArpRn2 b, ArpStep2 bsi, ArpStep2 bsj) {
         NOT_IMPLEMENTED();
@@ -3168,7 +3339,9 @@ public:
         const Reg64 value = rax;
         LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
         SignExtend(value, 16);
-        ShiftBus40(value, blk_key.sv, b.GetName());
+        const Reg16 sv = cx;
+        c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
+        ShiftBus40(value, sv, b.GetName());
     }
     void movs(Rn a, StepZIDS as, Ab b) {
         const Reg64 address = rax;
@@ -3176,13 +3349,17 @@ public:
         const Reg64 value = rax;
         LoadFromMemory(value, address);
         SignExtend(value, 16);
-        ShiftBus40(value, blk_key.sv, b.GetName());
+        const Reg16 sv = cx;
+        c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
+        ShiftBus40(value, sv, b.GetName());
     }
     void movs(Register a, Ab b) {
         const Reg64 value = rax;
         RegToBus16(a.GetName(), value);
         SignExtend(value, 16);
-        ShiftBus40(value, blk_key.sv, b.GetName());
+        const Reg16 sv = cx;
+        c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
+        ShiftBus40(value, sv, b.GetName());
     }
     void movs_r6_to(Ax b) {
         NOT_IMPLEMENTED();
@@ -3248,8 +3425,6 @@ public:
         const Reg64 count = rbx;
         Exp(value, count);
         c.mov(word[REGS + offsetof(JitRegisters, sv)], count.cvt16());
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        compiling = false;
     }
     void exp(Register a, Ax b) {
         NOT_IMPLEMENTED();
@@ -3291,10 +3466,14 @@ public:
     }
 
     void clrp0() {
-        NOT_IMPLEMENTED();
+        const Reg32 tmp = eax;
+        c.xor_(tmp, tmp);
+        ProductFromBus32(Px{0}, tmp);
     }
     void clrp1() {
-        NOT_IMPLEMENTED();
+        const Reg32 tmp = eax;
+        c.xor_(tmp, tmp);
+        ProductFromBus32(Px{1}, tmp);
     }
     void clrp() {
         const Reg32 tmp = eax;
@@ -3489,10 +3668,15 @@ public:
             GetAcc(value_c, acc);
             break;
         case SumBase::Sv:
-            c.mov(value_c, ::SignExtend<32, u64>((u64)blk_key.sv << 16));
+            c.movzx(value_c, word[REGS + offsetof(JitRegisters, sv)]);
+            c.shl(value_c, 16);
+            SignExtend(value_c, 32);
             break;
         case SumBase::SvRnd:
-            c.mov(value_c, ::SignExtend<32, u64>((u64)blk_key.sv << 16) | 0x8000);
+            c.movzx(value_c, word[REGS + offsetof(JitRegisters, sv)]);
+            c.shl(value_c, 16);
+            SignExtend(value_c, 32);
+            c.or_(value_c, 0x8000);
             break;
         default:
             UNREACHABLE();
@@ -3763,7 +3947,7 @@ private:
             c.movzx(out, word[REGS + offsetof(JitRegisters, sp)]);
             break;
         case RegName::sv:
-            c.mov(out, blk_key.sv);
+            c.mov(out, word[REGS + offsetof(JitRegisters, sv)]);
             break;
         case RegName::lc:
             regs.GetLc(c, out);
@@ -3967,8 +4151,6 @@ private:
 
         case RegName::sv:
             c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-            compiling = false;
             break;
 
         case RegName::lc:
@@ -4123,6 +4305,10 @@ private:
         case RegName::y0:
             c.mov(FACTORS.cvt16(), value);
             break;
+        case RegName::p:
+            c.mov(word[REGS + offsetof(JitRegisters, pe)], value > 0x7FFF);
+            c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16)], value);
+            break;
 
         case RegName::sp:
             c.mov(word[REGS + offsetof(JitRegisters, sp)], value);
@@ -4153,7 +4339,6 @@ private:
             break;
 
         case RegName::sv:
-            blk_key.sv = value;
             c.mov(word[REGS + offsetof(JitRegisters, sv)], value);
             break;
 

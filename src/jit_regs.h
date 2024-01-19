@@ -312,6 +312,10 @@ union Cfg {
     u16 raw;
     BitField<0, 7, u16> step;
     BitField<7, 9, u16> mod;
+
+    static constexpr u16 Mask() {
+        return decltype(Cfg::step)::mask | decltype(Cfg::mod)::mask;
+    }
 };
 
 // NOTE: The jit relies heavily on the member order, do not swap!
