@@ -52,6 +52,16 @@ constexpr inline Xbyak::Reg ABI_PARAM2 = Xbyak::util::rdx;
 constexpr inline Xbyak::Reg ABI_PARAM3 = Xbyak::util::r8;
 constexpr inline Xbyak::Reg ABI_PARAM4 = Xbyak::util::r9;
 
+const std::bitset<32> ABI_ALL_CALLER_SAVED_GPR = BuildRegSet({
+    // GPRs
+    Xbyak::util::rcx,
+    Xbyak::util::rdx,
+    Xbyak::util::r8,
+    Xbyak::util::r9,
+    Xbyak::util::r10,
+    Xbyak::util::r11,
+});
+
 const std::bitset<32> ABI_ALL_CALLER_SAVED = BuildRegSet({
     // GPRs
     Xbyak::util::rcx,
