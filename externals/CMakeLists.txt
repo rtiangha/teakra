@@ -7,4 +7,6 @@ endif()
 set(MCL_INSTALL OFF)
 add_subdirectory(mcl)
 
-add_subdirectory(xbyak)
+if (NOT TARGET xbyak::xbyak)
+    add_subdirectory(xbyak)
+endif()
