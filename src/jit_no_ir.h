@@ -890,7 +890,13 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        const Reg64 address = rbx;
+        RegToBus16(RegName::r7, address);
+        c.add(address, a.Unsigned16());
+        LoadFromMemory(value, address);
+        ExtendOperandForAlm(op.GetName(), value);
+        AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, Imm16 a, Ax b) {
         u16 value = a.Unsigned16();
@@ -1279,7 +1285,13 @@ public:
         SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add_p1(Ax b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value_a = rax;
+        ProductToBus40(value_a, Px{1});
+        const Reg64 value_b = rbx;
+        GetAcc(value_b, b.GetName());
+        const Reg64 result = rcx;
+        AddSub(value_b, value_a, result, false);
+        SatAndSetAccAndFlag(b.GetName(), result);
     }
     void add(Px a, Bx b) {
         const Reg64 value_a = rax;
@@ -2788,7 +2800,17 @@ public:
         NOT_IMPLEMENTED();
     }
     void movpdw(Ax a) {
-        NOT_IMPLEMENTED();
+        const Reg64 address = rbx;
+        GetAcc(address, a.GetName());
+        c.and_(address, 0x3FFFF);
+        const Reg64 pc = rax;
+        // the endianess doesn't seem to be affected by regs.cpc
+        ProgramRead(pc, address);
+        c.add(address, 1);
+        c.shl(pc, 16);
+        ProgramRead(pc, address);
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], pc);
+        compiling = false;
     }
 
     void mov(Ab a, Ab b) {
@@ -2883,7 +2905,12 @@ public:
         StoreToMemory(b.Unsigned16(), value16);
     }
     void mov(Axl a, MemR7Imm16 b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value16 = rax;
+        RegToBus16(a.GetName(), value16, true);
+        const Reg64 address = rbx;
+        RegToBus16(RegName::r7, address);
+        c.add(address, b.Unsigned16());
+        StoreToMemory(address, value16);
     }
     void mov(Axl a, MemR7Imm7s b) {
         const Reg64 value16 = rbx;
@@ -2955,7 +2982,12 @@ public:
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm16 a, Ax b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        const Reg64 address = rbx;
+        RegToBus16(RegName::r7, address);
+        c.add(address, a.Unsigned16());
+        LoadFromMemory(value, address);
+        RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm7s a, Ax b) {
         const Reg64 address = rax;
@@ -3209,7 +3241,9 @@ public:
         ProductFromBus32(Px{0}, value.cvt32());
     }
     void mov_p1_to(Ab b) {
-        NOT_IMPLEMENTED();
+        const Reg64 value = rax;
+        ProductToBus40(value, Px{1});
+        SatAndSetAccAndFlag(b.GetName(), value);
     }
 
     void mov2(Px a, ArRn2 b, ArStep2 bs) {
