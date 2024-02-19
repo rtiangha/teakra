@@ -692,9 +692,7 @@ public:
         c.imul(x, y);
         c.mov(dword[REGS + offsetof(JitRegisters, p) + sizeof(u32) * unit], x);
         if (x_sign || y_sign) {
-            c.bt(x, 31);
-            c.setc(x.cvt8());
-            c.and_(x.cvt16(), 0x1);
+            c.shr(x, 31);
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], x.cvt16());
         } else {
             c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16) * unit], 0);
@@ -902,7 +900,7 @@ public:
     void alu(Alu op, Imm8 a, Ax b) {
         u16 value = a.Unsigned16();
         const Reg64 and_backup = rsi;
-        c.xor_(and_backup, and_backup);
+        c.xor_(and_backup.cvt32(), and_backup.cvt32());
         if (op.GetName() == AlmOp::And) {
             // AND instruction has a special treatment:
             // bit 8~15 are unaffected in the accumulator, but the flags are set as if they are
@@ -1384,8 +1382,8 @@ public:
     }
 
     void ShiftBus40(Reg64 value, u16 sv, RegName dest) {
-        c.xor_(rcx, rcx);
         c.mov(rbx, 0xFF'FFFF'FFFF);
+        c.xor_(ecx, ecx); // rcx = 0
         c.and_(value, rbx);
         const Reg64 original_sign = rbx;
         c.mov(original_sign, value);
@@ -1409,7 +1407,7 @@ public:
                     c.shr(cx, 3); // mask >>= 3;
                     c.or_(FLAGS, cx);
                 }
-                c.xor_(value, value); // value = 0;
+                c.xor_(value.cvt32(), value.cvt32()); // value = 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
             } else {
                 if (blk_key.curr.mod0.s == 0) {
@@ -1448,7 +1446,7 @@ public:
                     // regs.fc0 = (value >> 39) & 1;
                     // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
                 } else {
-                    c.xor_(value, value); // value = 0;
+                    c.xor_(value.cvt32(), value.cvt32()); // value = 0;
                     c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
                 }
             } else {
@@ -1653,7 +1651,7 @@ public:
             c.add(result, b);
         }
         c.and_(FLAGS, ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
-        c.xor_(rsi, rsi);
+        c.xor_(esi, esi);
         c.bt(result, 40);
         c.setc(rsi.cvt8());
         c.shl(rsi, decltype(Flags::fc0)::position);
@@ -2560,7 +2558,7 @@ public:
     void tstb(MemImm8 a, Imm4 b) {
         const Reg64 value = rbx;
         LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
-        c.xor_(rax, rax);
+        c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
         c.setc(ah);
@@ -2571,7 +2569,7 @@ public:
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
         LoadFromMemory(value, address);
-        c.xor_(rax, rax);
+        c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
         c.setc(ah);
@@ -2581,7 +2579,7 @@ public:
         const Reg64 value = rax;
         RegToBus16(a.GetName(), value);
         const Reg64 mask = rbx;
-        c.xor_(mask, mask);
+        c.xor_(mask.cvt32(), mask.cvt32());
         c.and_(FLAGS, ~decltype(Flags::fz)::mask); // clear fz
         c.bt(value, b.Unsigned16());
         c.setc(mask.cvt8());
@@ -3521,10 +3519,8 @@ public:
         RnAndModify(0, bs.GetName(), r0);
 
         Xbyak::Label end_label, zero_fm;
-        c.bt(d, 63);
-        c.jc(zero_fm);
         c.test(d, d);
-        c.jz(zero_fm);
+        c.jle(zero_fm);
         c.bts(FLAGS, decltype(Flags::fm)::position);
         c.mov(word[REGS + offsetof(JitRegisters, mixp)], r0.cvt16());
         SetAcc(a.GetName(), v);
@@ -4281,7 +4277,7 @@ private:
         case RegName::a1h:
         case RegName::b0h:
         case RegName::b1h:
-            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
+            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(u32(value) << 16));
             break;
         case RegName::a0e:
         case RegName::a1e:
@@ -4413,7 +4409,7 @@ private:
                                    decltype(Flags::fe)::mask | decltype(Flags::fn)::mask);
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
             const Reg64 scratch = rdx;
-            c.xor_(scratch, scratch);
+            c.xor_(scratch.cvt32(), scratch.cvt32());
             c.and_(FLAGS.cvt32(), ACC_MASK); // clear fz, fm, fe, fn
             c.test(value, value);
             c.setz(scratch.cvt8()); // mask = (value == 0) ? 1 : 0;

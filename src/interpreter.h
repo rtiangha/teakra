@@ -1,5 +1,4 @@
 #pragma once
-#pragma clang optimize off
 #include <utility>
 #include <atomic>
 #include <stdexcept>
