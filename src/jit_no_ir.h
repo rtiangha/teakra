@@ -565,12 +565,12 @@ public:
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
             c.movzx(ABI_PARAM2, addr.cvt16());
         } else {
             c.mov(ABI_PARAM2, addr & 0xFFFF);
         }
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         CallFarFunction(c, MemDataReadThunk);
 
                // Undo anything we did
@@ -616,12 +616,12 @@ public:
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
             c.movzx(ABI_PARAM2, addr.cvt16());
         } else {
             c.mov(ABI_PARAM2, addr & 0xFFFF);
         }
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         CallFarFunction(c, MemDataReadThunk);
 
                // Undo anything we did
@@ -2823,13 +2823,13 @@ public:
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         if constexpr (std::is_base_of_v<Xbyak::Reg, T1>) {
             c.movzx(ABI_PARAM2, addr.cvt16());
         } else {
             c.mov(ABI_PARAM2, addr);
         }
         c.mov(ABI_PARAM3, value);
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         CallFarFunction(c, MemDataWriteThunk);
 
                // Undo anything we did
