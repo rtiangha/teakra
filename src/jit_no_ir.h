@@ -2579,7 +2579,7 @@ public:
         const Reg64 value = rax;
         RegToBus16(a.GetName(), value);
         const Reg64 mask = rbx;
-        c.xor_(mask, mask);
+        c.xor_(mask.cvt32(), mask.cvt32());
         c.and_(FLAGS, ~decltype(Flags::fz)::mask); // clear fz
         c.bt(value, b.Unsigned16());
         c.setc(mask.cvt8());
@@ -4277,7 +4277,7 @@ private:
         case RegName::a1h:
         case RegName::b0h:
         case RegName::b1h:
-            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(value << 16));
+            SatAndSetAccAndFlag(reg, ::SignExtend<32, u64>(u32(value) << 16));
             break;
         case RegName::a0e:
         case RegName::a1e:
