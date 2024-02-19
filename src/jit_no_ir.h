@@ -96,6 +96,20 @@ public:
     BlockKey blk_key{};
     bool unimplemented = false;
 
+    void Reset() {
+        // Reset registers
+        regs.Reset();
+
+        // Clear any program data from previous runs
+        code_blocks.clear();
+        bkrep_end_locations.clear();
+        rep_end_locations.clear();
+
+        // Reset code generator and emit the dispatcher again
+        c.reset();
+        EmitDispatcher();
+    }
+
     void Run(s64 cycles, Interpreter* debug_interp_) {
         cycles_remaining = cycles;
         debug_interp = debug_interp_;

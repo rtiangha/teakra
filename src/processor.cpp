@@ -22,7 +22,7 @@ Processor::~Processor() = default;
 
 void Processor::Reset() {
     if (impl->use_jit) {
-        impl->regs.Reset();
+        impl->jit.Reset();
     } else {
         impl->iregs.Reset();
     }
