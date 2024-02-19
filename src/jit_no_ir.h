@@ -4317,7 +4317,7 @@ private:
             break;
         case RegName::p:
             c.mov(word[REGS + offsetof(JitRegisters, pe)], value > 0x7FFF);
-            c.mov(word[REGS + offsetof(JitRegisters, pe) + sizeof(u16)], value);
+            c.mov(word[REGS + offsetof(JitRegisters, p) + sizeof(u16)], value);
             break;
 
         case RegName::sp:
