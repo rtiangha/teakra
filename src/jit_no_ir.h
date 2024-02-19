@@ -21,6 +21,16 @@
 #include "register.h"
 #include "xbyak_abi.h"
 
+#ifdef WIN32
+static constexpr bool IsWindows() {
+    return true;
+}
+#else
+static constexpr bool IsWindows() {
+    return false;
+}
+#endif
+
 namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 256 * 1024 * 1024;
@@ -1882,7 +1892,7 @@ public:
         c.setc(byte[REGS + offsetof(JitRegisters, bcn)]);
         c.L(end_label);
 
-        const Reg64 start_end = rdx;
+        const Reg64 start_end = IsWindows() ? rsi : rdx;
         c.rorx(start_end, flag, 8);
         c.and_(start_end, 0x3);
         c.shl(start_end, 16);
@@ -1904,7 +1914,7 @@ public:
         const Reg64 flag = rcx;
         c.mov(flag, word[REGS + offsetof(JitRegisters, lp)]);
         c.shl(flag, 15);
-        const Reg64 start_end = rdx;
+        const Reg64 start_end = IsWindows() ? rsi : rdx;
         c.mov(start_end, qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)]);
         c.sub(address_reg, 1);
         StoreToMemory(address_reg, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)]);
