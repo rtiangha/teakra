@@ -2558,7 +2558,7 @@ public:
     void tstb(MemImm8 a, Imm4 b) {
         const Reg64 value = rbx;
         LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
-        c.xor_(rax, rax);
+        c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
         c.setc(ah);
@@ -2569,7 +2569,7 @@ public:
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
         LoadFromMemory(value, address);
-        c.xor_(rax, rax);
+        c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
         c.setc(ah);
