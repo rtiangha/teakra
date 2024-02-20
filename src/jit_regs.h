@@ -697,11 +697,11 @@ struct JitRegisters {
             c.or_(FLAGS.cvt16(), si);
 
             // Replace upper word of a[0] with sign extended a0e.
+            c.mov(A[0].cvt32(), A[0].cvt32()); // Clear top 32 bits of A[0]
             c.and_(value, decltype(St0::a0e_alias)::mask);
             c.shl(value, 64 - decltype(St0::a0e_alias)::position - decltype(St0::a0e_alias)::bits);
-            c.sar(value, 64 - decltype(St0::a0e_alias)::bits);
-            c.mov(value.cvt32(), A[0].cvt32());
-            c.mov(A[0], value);
+            c.sar(value, 32 - decltype(St0::a0e_alias)::bits);
+            c.or_(A[0], value);
         } else {
             const St0 reg{.raw = value};
 
@@ -719,9 +719,9 @@ struct JitRegisters {
 
             // Replace upper word of a[0] with sign extended a0e.
             const u64 value32 = SignExtend<4, u32>(reg.a0e_alias.Value());
+            c.mov(A[0].cvt32(), A[0].cvt32());
             c.mov(rsi, value32 << 32);
-            c.mov(rsi.cvt32(), A[0].cvt32());
-            c.mov(A[0], rsi);
+            c.or_(A[0], rsi);
         }
     }
 
@@ -757,11 +757,12 @@ struct JitRegisters {
             c.or_(rsi, value.cvt32());
             c.mov(dword[REGS + offsetof(JitRegisters, mod1)], rsi.cvt32());
 
-            // Replace upper word of a[1] with sign extended a1e.
-            c.shl(value, 32 - decltype(St1::a1e_alias)::bits);
-            c.sar(value, 32 - decltype(St1::a1e_alias)::bits);
-            c.mov(value.cvt32(), A[1].cvt32());
-            c.mov(A[1], value);
+            // Replace upper word of a[0] with sign extended a0e.
+            c.mov(A[1].cvt32(), A[1].cvt32()); // Clear top 32 bits of A[0]
+            c.and_(value, decltype(St0::a0e_alias)::mask);
+            c.shl(value, 64 - decltype(St0::a0e_alias)::position - decltype(St0::a0e_alias)::bits);
+            c.sar(value, 32 - decltype(St0::a0e_alias)::bits);
+            c.or_(A[1], value);
         } else {
             const St1 reg{.raw = value};
             // Copy to lower byte of mod1 which is page
