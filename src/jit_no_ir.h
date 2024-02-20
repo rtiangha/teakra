@@ -1502,7 +1502,7 @@ public:
 
     void ShiftBus40(Reg64 value, Reg16 sv, RegName dest) {
         ASSERT(sv.getIdx() == Xbyak::Operand::CL);
-        c.xor_(rsi, rsi);
+        c.xor_(esi, esi);
         c.mov(rbx, 0xFF'FFFF'FFFF);
         c.and_(value, rbx);
         const Reg64 original_sign = rbx;
@@ -1519,9 +1519,9 @@ public:
             // regs.fv = value != 0;
             c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
             c.test(value, value);
-            c.setne(sil); // u32 mask = (value != 0) ? 1 : 0
+            c.setne(sil);                             // u32 mask = (value != 0) ? 1 : 0
             c.shl(si, decltype(Flags::fv)::position); // mask <<= fv_pos
-            c.or_(FLAGS, si); // flags |= mask
+            c.or_(FLAGS, si);                         // flags |= mask
             // if (regs.fv) {
             //    regs.fvl = 1;
             // }
@@ -1531,7 +1531,7 @@ public:
             c.shr(si, 3); // mask >>= 3;
             c.or_(FLAGS, si);
         }
-        c.xor_(value, value); // value = 0;
+        c.xor_(value, value);                       // value = 0;
         c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
         c.jmp(end_left_shift);
         c.L(normal_shift);
@@ -1544,16 +1544,17 @@ public:
             c.sar(rdx, sv.cvt8());
             c.sub(sv, 24);
 
-                   // rcx = SignExtend(value, 40);
+            // rcx = SignExtend(value, 40);
             c.mov(rsi, value);
             SignExtend(rsi, 40);
 
-                   // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
+            // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
             c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
             c.cmp(rsi, rdx);
             c.setne(sil); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv) ? 1 : 0
+            c.and_(si, 1);
             c.shl(si, decltype(Flags::fv)::position); // mask <<= fv_pos
-            c.or_(FLAGS.cvt8(), si); // flags |= mask
+            c.or_(FLAGS.cvt8(), si);                  // flags |= mask
             // if (regs.fv) {
             //     regs.fvl = 1;
             // }
@@ -1561,10 +1562,11 @@ public:
             c.or_(FLAGS.cvt8(), si);
         }
         c.shl(value, sv.cvt8()); // value <<= sv;
+        c.xor_(esi, esi);
         // regs.fc0 = (value & ((u64)1 << 40)) != 0;
         c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
         c.bt(value, 40);
-        c.setc(sil); // u32 mask = (value & ((u64)1 << 40));
+        c.setc(sil);                               // u32 mask = (value & ((u64)1 << 40));
         c.shl(si, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
         c.or_(FLAGS.cvt8(), si);
         c.L(end_left_shift);
@@ -1579,6 +1581,7 @@ public:
         c.jl(normal_right_shift);
         if (blk_key.curr.mod0.s == 0) {
             c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
+            c.xor_(esi, esi);
             c.bt(value, 39);
             c.setc(sil);
             c.shl(sil, decltype(Flags::fc0)::position);
@@ -1588,16 +1591,17 @@ public:
             c.sar(value, 63);
             // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
         } else {
-            c.xor_(value, value); // value = 0;
+            c.xor_(value, value);                       // value = 0;
             c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
         }
         c.jmp(end_right_shift);
         c.L(normal_right_shift);
         // regs.fc0 = (value & ((u64)1 << (nsv - 1))) != 0;
         c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
+        c.xor_(esi, esi);
         c.sub(nsv, 1);
         c.bt(value, nsv.cvt64());
-        c.setc(sil); // u32 mask = (value & ((u64)1 << (nsv - 1)));
+        c.setc(sil);                               // u32 mask = (value & ((u64)1 << (nsv - 1)));
         c.shl(si, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
         c.or_(FLAGS, si);
         c.add(nsv, 1);
@@ -1936,7 +1940,7 @@ public:
     void StoreBlockRepeat(Reg64 address_reg) {
         using Frame = JitRegisters::BlockRepeatFrame;
         const Reg64 flag = rcx;
-        c.mov(flag, word[REGS + offsetof(JitRegisters, lp)]);
+        c.movzx(flag, word[REGS + offsetof(JitRegisters, lp)]);
         c.shl(flag, 15);
         const Reg64 start_end = IsWindows() ? rsi : rdx;
         c.mov(start_end, qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)]);
@@ -1971,7 +1975,7 @@ public:
     }
     void bkreprst_memsp() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp.cvt32(), word[REGS + offsetof(JitRegisters, sp)]);
         RestoreBlockRepeat(sp);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
@@ -1980,7 +1984,7 @@ public:
     }
     void bkrepsto_memsp() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp.cvt32(), word[REGS + offsetof(JitRegisters, sp)]);
         StoreBlockRepeat(sp);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
     }
@@ -2410,12 +2414,15 @@ public:
         const Reg64 sp = rbx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
+        const Reg32 tmp = eax; // Register used just for truncating the accumulator register to 32 bits
         LoadFromMemory(value, sp);
         c.add(sp, 1);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.movsx(value.cvt32(), value.cvt8());
         c.shl(value, 32);
-        c.mov(value.cvt32(), GetAccDirect(a.GetName()));
+        // Zero-extend bottom 32 bits of accumulator to tmp.cvt64() and merge it into value
+        c.mov(tmp, GetAccDirect(a.GetName()).cvt32());
+        c.or_(value, tmp.cvt64());
         SetAccAndFlag(a.GetName(), value);
     }
     void pop(ArArpSttMod a) {
