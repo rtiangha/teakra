@@ -2688,7 +2688,12 @@ public:
         NOT_IMPLEMENTED();
     }
     void mul_y0(Mul2 op, MemImm8 x, Ax a) {
-        NOT_IMPLEMENTED();
+        const Reg64 x0 = rax;
+        LoadFromMemory(x0, x);
+        c.rorx(FACTORS, FACTORS, 32);
+        c.mov(FACTORS.cvt16(), x0.cvt16());
+        c.rorx(FACTORS, FACTORS, 32);
+        MulGeneric(op.GetName(), a);
     }
 
     void mpyi(Imm8s x) {
