@@ -2398,12 +2398,15 @@ public:
         const Reg64 sp = rbx;
         c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
+        const Reg32 tmp = eax; // Register used just for truncating the accumulator register to 32 bits
         LoadFromMemory(value, sp);
         c.add(sp, 1);
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.movsx(value.cvt32(), value.cvt8());
         c.shl(value, 32);
-        c.mov(value.cvt32(), GetAccDirect(a.GetName()));
+        // Zero-extend bottom 32 bits of accumulator to tmp.cvt64() and merge it into value
+        c.mov(tmp, GetAccDirect(a.GetName()).cvt32());
+        c.or_(value, tmp.cvt64());
         SetAccAndFlag(a.GetName(), value);
     }
     void pop(ArArpSttMod a) {
