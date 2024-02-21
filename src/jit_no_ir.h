@@ -890,8 +890,9 @@ public:
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
-        const Reg64 value = rax;
-        const Reg64 address = rbx;
+        const Reg64 address = rax;
+        const Reg64 value = rbx;
+
         RegToBus16(RegName::r7, address);
         c.add(address, a.Unsigned16());
         LoadFromMemory(value, address);
@@ -4667,7 +4668,7 @@ private:
         }
         const bool emod = blk_key.curr.mod2.IsM(unit) && !blk_key.curr.mod2.IsBr(unit) && !dmod;
         u16 mod = unit < 4 ? blk_key.cfgi.mod : blk_key.cfgj.mod;
-        [[maybe_unused]]u16 mask = 1; // mod = 0 still have one bit mask
+        [[maybe_unused]] u16 mask = 1; // mod = 0 still have one bit mask
         for (u32 i = 0; i < 9; ++i) {
             mask |= mod >> i;
         }
@@ -4676,10 +4677,24 @@ private:
                 c.add(address, 1);
                 return;
             }
-            NOT_IMPLEMENTED();
-            //if ((address & mask) == mod)
+            // if ((address & mask) == mod)
             //    return address & ~mask;
-            //return address + 1;
+            // return address + 1;
+            Xbyak::Label addressDoesNotEqualMask;
+
+            // Note: This section has a LOT of register pressure!
+            const Reg16 tmp = si;
+            c.mov(tmp, address);
+            c.add(address, 1); 
+            c.and_(tmp, mask);
+            c.cmp(tmp, mod);
+            c.jne(addressDoesNotEqualMask);
+            // Subtract 1 to get the original value
+            c.mov(tmp, ~mask);
+            c.sub(address, 1);
+            // Xbyak seems to have issues with AND r, imm16, so we need to store the value to a register
+            c.and_(address, tmp);
+            c.L(addressDoesNotEqualMask);
         } else { // OffsetValue::MinusOne
             if (!emod) {
                 c.sub(address, 1);
@@ -4690,9 +4705,9 @@ private:
             // neither of which is the original Rn value.
             // This only happens for memory writing, but not for memory reading.
             // Might be some undefined behaviour.
-            //if ((address & mask) == 0)
+            // if ((address & mask) == 0)
             //    return address | mod;
-            //return address - 1;
+            // return address - 1;
         }
     }
 
