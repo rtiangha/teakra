@@ -3160,8 +3160,21 @@ public:
         CodebookSearch(u, v, r, c);
     }
 
+    constexpr static bool dummy_mma = true;
+
     void mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
              bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
+        if (dummy_mma) {
+            SatAndSetAccAndFlag(a, 0);
+            regs.x[0] = 0;
+            regs.x[1] = 0;
+            regs.y[0] = 0;
+            regs.y[1] = 0;
+            regs.p[0] = 0;
+            regs.p[1] = 0;
+            return;
+        }
+
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         std::swap(regs.x[0], regs.x[1]);
         DoMultiplication(0, x0_sign, y0_sign);
@@ -3172,6 +3185,17 @@ public:
     void mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
              bool sub_p1, bool p1_align) {
+        if (dummy_mma) {
+            SatAndSetAccAndFlag(a, 0);
+            regs.x[0] = 0;
+            regs.x[1] = 0;
+            regs.y[0] = 0;
+            regs.y[1] = 0;
+            regs.p[0] = 0;
+            regs.p[1] = 0;
+            return;
+        }
+
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         auto [ui, uj] = GetArpRnUnit(xy);
         auto [si, sj] = GetArpStep(i, j);
@@ -3189,6 +3213,17 @@ public:
     void mma_mx_xy(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
+        if (dummy_mma) {
+            SatAndSetAccAndFlag(a, 0);
+            regs.x[0] = 0;
+            regs.x[1] = 0;
+            regs.y[0] = 0;
+            regs.y[1] = 0;
+            regs.p[0] = 0;
+            regs.p[1] = 0;
+            return;
+        }
+
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         std::swap(regs.x[0], regs.x[1]);
         regs.y[0] = mem.DataRead(RnAddressAndModify(GetArRnUnit(y), GetArStep(ys)));
@@ -3199,6 +3234,17 @@ public:
     void mma_xy_mx(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
+        if (dummy_mma) {
+            SatAndSetAccAndFlag(a, 0);
+            regs.x[0] = 0;
+            regs.x[1] = 0;
+            regs.y[0] = 0;
+            regs.y[1] = 0;
+            regs.p[0] = 0;
+            regs.p[1] = 0;
+            return;
+        }
+
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         std::swap(regs.x[0], regs.x[1]);
         regs.y[1] = mem.DataRead(RnAddressAndModify(GetArRnUnit(y), GetArStep(ys)));
@@ -3209,6 +3255,17 @@ public:
     void mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
+        if (dummy_mma) {
+            SatAndSetAccAndFlag(a, 0);
+            regs.x[0] = 0;
+            regs.x[1] = 0;
+            regs.y[0] = 0;
+            regs.y[1] = 0;
+            regs.p[0] = 0;
+            regs.p[1] = 0;
+            return;
+        }
+
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         u16 unit = GetArRnUnit(x);
         u16 address = RnAddressAndModify(unit, GetArStep(xs));
