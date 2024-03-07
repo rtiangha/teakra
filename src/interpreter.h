@@ -18,6 +18,7 @@
 #include "decoder.h"
 #include "memory_interface.h"
 #include "operand.h"
+#include "processor_engine.h"
 #include "register.h"
 
 namespace Teakra {
@@ -27,9 +28,16 @@ public:
     UnimplementedException() : std::runtime_error("unimplemented") {}
 };
 
-class Interpreter {
+class Interpreter : public ProcessorEngine {
 public:
     std::ofstream trace_file;
+    Interpreter(CoreTiming& core_timing, RegisterState& regs, MemoryInterface& mem)
+        : core_timing(core_timing), regs(regs), mem(mem) {
+    }
+
+    void Reset() override {
+
+    }
 
     FILE* dbg_in;
     FILE* dbg_out;
@@ -268,7 +276,7 @@ private:
     }
 
 public:
-    void Run(u64 cycles) {
+    void Run(u64 cycles) override {
         idle = false;
         trace_file << std::setfill('0') << std::setw(8) << std::right << std::uppercase << std::hex
              << regs.pc << std::endl;
@@ -459,10 +467,10 @@ public:
         }
     }
 
-    void SignalInterrupt(u32 i) {
+    void SignalInterrupt(u32 i) override {
         interrupt_pending[i] = true;
     }
-    void SignalVectoredInterrupt(u32 address, bool context_switch) {
+    void SignalVectoredInterrupt(u32 address, bool context_switch) override {
         vinterrupt_address = address;
         vinterrupt_pending = true;
         vinterrupt_context_switch = context_switch;
