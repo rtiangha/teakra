@@ -39,19 +39,18 @@ add_library(teakra
     test.h
     test_generator.cpp
     test_generator.h
-    jit.h jit.cpp
     xbyak_abi.h
-    ir/basic_block.cpp
-    ir/basic_block.h
-    ir/ir_emitter.cpp
-    ir/ir_emitter.h
-    ir/microinstruction.cpp
-    ir/microinstruction.h
-    ir/value.cpp
-    ir/value.h
-    ir/opcode.h
-    jit_no_ir.cpp
-    jit_no_ir.h
+    #ir/basic_block.cpp
+    #ir/basic_block.h
+    #ir/ir_emitter.cpp
+    #ir/ir_emitter.h
+    #ir/microinstruction.cpp
+    #ir/microinstruction.h
+    #ir/value.cpp
+    #ir/value.h
+    #ir/opcode.h
+    jit.cpp
+    jit.h
     jit_regs.h
     cityhash.cpp
     cityhash.h

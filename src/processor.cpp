@@ -1,4 +1,4 @@
-#include "jit_no_ir.h"
+#include "jit.h"
 #include "processor.h"
 #include "register.h"
 
@@ -18,6 +18,7 @@ struct Processor::Impl {
 
 Processor::Processor(CoreTiming& core_timing, MemoryInterface& memory_interface, bool use_jit)
     : impl(new Impl(core_timing, memory_interface, use_jit)) {}
+
 Processor::~Processor() = default;
 
 void Processor::Reset() {
