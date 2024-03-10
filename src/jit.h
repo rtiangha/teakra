@@ -110,7 +110,7 @@ public:
         EmitDispatcher();
     }
 
-    void Run(s64 cycles, Interpreter* debug_interp_) {
+    u32 Run(s64 cycles, Interpreter* debug_interp_) {
         cycles_remaining = cycles;
         debug_interp = debug_interp_;
         iregs = &debug_interp->regs;
@@ -119,6 +119,7 @@ public:
         debug_interp->idle = false;
         regs.idle = false;
         run_code(this);
+        return std::abs(cycles_remaining);
     }
 
     void EmitDispatcher() {
@@ -269,7 +270,7 @@ public:
 
         // DEBUG: Run interpreter before running block. We will compare register
         // state when the dispatcher is re-entered to ensure JIT was correct.
-        //debug_interp->Run(current_blk->cycles);
+        //debug_interp->RunWithJit(current_blk->cycles);
         //ASSERT(cycles_remaining == debug_interp->total_cycles);
         //CompareRegisterState();
     }

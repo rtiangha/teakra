@@ -29,11 +29,11 @@ void Processor::Reset() {
     }
 }
 
-void Processor::Run(unsigned cycles, Interpreter* debug_interp) {
+u32 Processor::Run(unsigned cycles, Interpreter* debug_interp) {
     if (impl->use_jit) {
-        impl->jit.Run(cycles, debug_interp);
+        return impl->jit.Run(cycles, debug_interp);
     } else {
-        impl->interpreter.Run(cycles);
+        return impl->interpreter.Run(cycles);
     }
 }
 
@@ -44,6 +44,7 @@ void Processor::SignalInterrupt(u32 i) {
         impl->interpreter.SignalInterrupt(i);
     }
 }
+
 void Processor::SignalVectoredInterrupt(u32 address, bool context_switch) {
     if (impl->use_jit) {
         impl->jit.SignalVectoredInterrupt(address, context_switch);
