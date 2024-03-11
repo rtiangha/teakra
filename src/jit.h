@@ -55,8 +55,8 @@ public:
     using BlockFunc = void(*)(JitRegisters*);
 
     struct BlockSwapState {
-        Mod0 mod0{};
         Mod1 mod1{};
+        Mod0 mod0{};
         Mod2 mod2{};
         std::array<ArpU, 4> arp{};
         std::array<ArU, 2> ar{};
@@ -66,10 +66,10 @@ public:
     struct BlockKey {
         BlockSwapState curr{};
         BlockSwapState shadow{};
-        u16 stepi0, stepj0;
-        u16 stepi0b, stepj0b;
         Cfg cfgi, cfgj;
+        u16 stepi0, stepj0;
         Cfg cfgib, cfgjb;
+        u16 stepi0b, stepj0b;
         u32 pc;
     };
 
@@ -157,42 +157,14 @@ public:
 
         // Lookup and compile next block
         blk_key.pc = regs.pc;
-
         // State for bank exchange.
-        blk_key.cfgi.raw = regs.cfgi.raw & Cfg::Mask();
-        blk_key.cfgj.raw = regs.cfgj.raw & Cfg::Mask();
-        blk_key.cfgib.raw = regs.cfgib.raw & Cfg::Mask();
-        blk_key.cfgjb.raw = regs.cfgjb.raw & Cfg::Mask();
-        blk_key.stepi0 = regs.stepi0;
-        blk_key.stepj0 = regs.stepj0;
-        blk_key.stepi0b = regs.stepi0b;
-        blk_key.stepj0b = regs.stepj0b;
-
+        std::memcpy(&blk_key.cfgi, &regs.cfgi, sizeof(u16) * 8);
         // Current state
-        blk_key.curr.mod0.raw = regs.mod0.raw & Mod0::Mask();
-        blk_key.curr.mod1.raw = regs.mod1.raw & Mod1::Mask();
-        blk_key.curr.mod2.raw = regs.mod2.raw;
-        blk_key.curr.ar = regs.ar;
-        for (size_t i = 0; i < blk_key.curr.ar.size(); i++) {
-            blk_key.curr.ar[i].raw &= ArU::Mask();
-        }
-        blk_key.curr.arp = regs.arp;
-        for (size_t i = 0; i < blk_key.curr.arp.size(); i++) {
-            blk_key.curr.arp[i].raw &= ArpU::Mask();
-        }
-
+        std::memcpy(&blk_key.curr.mod1, &regs.mod1, sizeof(u16) * 3);
+        std::memcpy(&blk_key.curr.arp, &regs.arp, sizeof(regs.arp) + sizeof(regs.ar));
         // Shadow state.
-        blk_key.shadow.mod0.raw = regs.mod0b.raw & Mod0::Mask();
-        blk_key.shadow.mod1.raw = regs.mod1b.raw & Mod1::Mask();
-        blk_key.shadow.mod2 = regs.mod2b;
-        blk_key.shadow.ar = regs.arb;
-        for (size_t i = 0; i < blk_key.shadow.ar.size(); i++) {
-            blk_key.shadow.ar[i].raw &= ArU::Mask();
-        }
-        blk_key.shadow.arp = regs.arpb;
-        for (size_t i = 0; i < blk_key.shadow.arp.size(); i++) {
-            blk_key.shadow.arp[i].raw &= ArpU::Mask();
-        }
+        std::memcpy(&blk_key.shadow.mod1, &regs.mod1b, sizeof(u16) * 3);
+        std::memcpy(&blk_key.shadow.arp, &regs.arpb, sizeof(regs.arpb) + sizeof(regs.arb));
 
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
