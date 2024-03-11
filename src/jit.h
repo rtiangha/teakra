@@ -86,9 +86,7 @@ public:
 
     CoreTiming& core_timing;
     JitRegisters& regs;
-    RegisterState* iregs;
     MemoryInterface& mem;
-    Interpreter* debug_interp;
     Xbyak::CodeGenerator c;
     s32 cycles_remaining;
     Xbyak::Label block_exit;
@@ -116,13 +114,9 @@ public:
         EmitDispatcher();
     }
 
-    u32 Run(s64 cycles, Interpreter* debug_interp_) {
+    u32 Run(s64 cycles) {
         cycles_remaining = cycles;
-        debug_interp = debug_interp_;
-        iregs = &debug_interp->regs;
-        debug_interp->total_cycles = cycles;
         current_blk = nullptr;
-        debug_interp->idle = false;
         regs.idle = false;
         run_code(this);
         return std::abs(cycles_remaining);
@@ -161,9 +155,8 @@ public:
             return nullptr;
         }
 
-        // Lookup and compile next block
-        blk_key.pc = regs.pc;
         // State for bank exchange.
+        blk_key.pc = regs.pc;
         std::memcpy(&blk_key.cfgi, &regs.cfgi, sizeof(u16) * 8);
         // Current state
         std::memcpy(&blk_key.curr.mod1, &regs.mod1, sizeof(u16) * 3);
@@ -205,7 +198,7 @@ public:
             regs.ipv = 1;
         }
 
-        // Return block function
+        // Return the block function to execute.
         return current_blk->func;
     }
 
@@ -245,12 +238,6 @@ public:
         // Count the cycles of the previous executed block.
         core_timing.Tick(current_blk->cycles);
         cycles_remaining -= current_blk->cycles;
-
-        // DEBUG: Run interpreter before running block. We will compare register
-        // state when the dispatcher is re-entered to ensure JIT was correct.
-        //debug_interp->RunWithJit(current_blk->cycles);
-        //ASSERT(cycles_remaining == debug_interp->total_cycles);
-        //CompareRegisterState();
     }
 
     void CompileBlock(Block& blk) {
@@ -299,6 +286,10 @@ public:
         }
 
         // Flush block state
+        EmitBlockExit();
+    }
+
+    void EmitBlockExit() {
         c.mov(qword[REGS + offsetof(JitRegisters, r)], R0_1_2_3);
         c.mov(qword[REGS + offsetof(JitRegisters, r) + sizeof(u16) * 4], R4_5_6_7);
         c.mov(qword[REGS + offsetof(JitRegisters, y)], FACTORS);
@@ -2031,9 +2022,11 @@ public:
     void br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         ConditionPass(cond, [&] {
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], Address32(addr_low, addr_high));
+            regs.pc = Address32(addr_low, addr_high);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
     }
 
     void brr(RelAddr7 addr, Cond cond) {
@@ -2044,9 +2037,12 @@ public:
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             if (addr.Relative32() == 0xFFFFFFFF) {
                 c.mov(dword[REGS + offsetof(JitRegisters, idle)], true);
+                compiling = false; // Always end compilation for idle loops.
+            } else {
+                // For static jump we can continue compiling.
+                compiling = cond.GetName() == CondValue::True;
             }
         });
-        compiling = false;
     }
 
     void break_() {
@@ -2057,9 +2053,11 @@ public:
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         ConditionPass(cond, [&] {
             EmitPushPC();
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], Address32(addr_low, addr_high));
+            regs.pc = Address32(addr_low, addr_high);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
     }
     void calla(Axl a) {
         NOT_IMPLEMENTED();
@@ -2079,7 +2077,8 @@ public:
             regs.pc += addr.Relative32();
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
     }
 
     void cntx_s() {
@@ -5173,80 +5172,6 @@ private:
                                                         {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
                                                         };
         return map.at(in);
-    }
-
-    bool CompareRegisterState() {
-        using Frame = JitRegisters::BlockRepeatFrame;
-        bool result = true;
-        auto& raw = mem.GetMemory().raw;
-        if (!(std::memcmp(raw.data(), debug_interp->mem.GetMemory().raw.data(), raw.size()) == 0)) {
-            printf("Memory does not match!\n");
-            for (size_t i = 0; i < raw.size(); i += 2) {
-                const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[i];
-                const u16 jit = *(u16*)&raw[i];
-                if (interp != jit && !(interp == (iregs->pc & 0xFFFF) && jit == (regs.pc & 0xFFFF))) {
-                    printf("Word 0x%lx mismatch (interp: 0x%x, jit: 0x%x)\n", i >> 1, interp, jit);
-                    result = false;
-                }
-            }
-            std::fflush(stdout);
-        }
-        if (!(regs.pc == iregs->pc && regs.r == iregs->r && regs.cpc == iregs->cpc && regs.prpage == iregs->prpage && regs.repc == iregs->repc && regs.repcs == iregs->repcs)) {
-            std::fflush(stdout);
-            printf("Failed part 0 of checks\n");
-            result = false;
-        }
-        if (!(regs.im == iregs->im && regs.ou == iregs->ou && regs.nimc == iregs->nimc)) {
-            printf("Failed part 1 of checks\n");
-            result = false;
-        }
-        if (!(regs.crep == iregs->crep && regs.a == iregs->a && regs.b == iregs->b)) {
-            printf("Failed part 2 of checks\n");
-            result = false;
-        }
-        if (!(regs.ccnta == iregs->ccnta && regs.mod0.sat == iregs->sat && regs.mod0.sata == iregs->sata && regs.mod0.s == iregs->s && regs.sv == iregs->sv)) {
-            printf("Failed part 3 of checks\n");
-            result = false;
-        }
-        if (!(regs.flags.fz == iregs->fz && regs.flags.fm == iregs->fm && regs.flags.fn == iregs->fn && regs.flags.fv == iregs->fv && regs.flags.fe == iregs->fe)) {
-            const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[0x78d6 * 2];
-            const u16 jit = *(u16*)&raw[0x78d6 * 2];
-            printf("Interp 0x%x JIT 0x%x\n", interp, jit);
-            std::fflush(stdout);
-            printf("Failed part 4 of checks\n");
-            result = false;
-        }
-        if (!(regs.flags.fc0 == iregs->fc0 && regs.flags.fc1 == iregs->fc1 && regs.flags.flm == iregs->flm && regs.flags.fvl == iregs->fvl && regs.flags.fr == iregs->fr)) {
-            std::fflush(stdout);
-            printf("Failed part 5 of checks\n");
-            result = false;
-        }
-        if (!(regs.vtr0 == iregs->vtr0 && regs.vtr1 == iregs->vtr1 && regs.x == iregs->x && regs.y == iregs->y && regs.mod0.hwm == iregs->hwm && regs.p == iregs->p)) {
-            printf("Failed part 6 of checks\n");
-            result = false;
-        }
-        if (!(regs.pe == iregs->pe && regs.mod0.ps0 == iregs->ps[0] && regs.mod0.ps1 == iregs->ps[1] && regs.p0h_cbs == iregs->p0h_cbs && regs.mixp == iregs->mixp)) {
-            printf("Failed part 7 of checks\n");
-            result = false;
-        }
-        if (!(regs.sp == iregs->sp && regs.mod1.page == iregs->page && regs.pcmhi == iregs->pcmhi && regs.cfgi.step == iregs->stepi && regs.cfgj.step == iregs->stepj)) {
-            printf("Failed part 8 of checks\n");
-            result = false;
-        }
-        if (!(regs.cfgi.mod == iregs->modi && regs.cfgj.mod == iregs->modj && regs.stepi0 == iregs->stepi0 && regs.stepj0 == iregs->stepj0 && regs.mod1.stp16 == iregs->stp16)) {
-            printf("Failed part 9 of checks\n");
-            result = false;
-        }
-        if (!(regs.mod1.cmd == iregs->cmd && regs.mod1.epi == iregs->epi && regs.mod1.epj == iregs->epj)) {
-            printf("Failed part 10 of checks\n");
-            result = false;
-        }
-        if (!(regs.lp == iregs->lp && regs.bcn == iregs->bcn && std::memcmp(&regs.bkrep_stack, &iregs->bkrep_stack, sizeof(Frame)) == 0)) {
-            printf("Failed part 11 of checks\n");
-            result = false;
-        }
-        return result;
-
     }
 };
 

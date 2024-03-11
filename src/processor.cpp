@@ -31,7 +31,7 @@ void Processor::Reset() {
 
 u32 Processor::Run(unsigned cycles, Interpreter* debug_interp) {
     if (impl->use_jit) {
-        return impl->jit.Run(cycles, debug_interp);
+        return impl->jit.Run(cycles);
     } else {
         return impl->interpreter.Run(cycles);
     }
