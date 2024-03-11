@@ -2,15 +2,14 @@
 #include "shared_memory.h"
 #include <utility>
 #include <atomic>
-#include <stdexcept>
 #include <tuple>
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <xbyak/xbyak.h>
+#include <tsl/robin_map.h>
 #include "bit.h"
-#include <bit>
 #include <set>
 #include "core_timing.h"
 #include "memory_interface.h"
@@ -79,6 +78,12 @@ public:
         s32 cycles;
     };
 
+    enum JitStatus {
+        Compiling = 0,
+        EndStaticJump = 1,
+        EndDynJump = 2,
+    };
+
     CoreTiming& core_timing;
     JitRegisters& regs;
     RegisterState* iregs;
@@ -91,7 +96,8 @@ public:
     std::set<u32> bkrep_end_locations;
     std::set<u32> rep_end_locations;
     bool compiling = false;
-    std::unordered_map<size_t, Block, std::identity> code_blocks;
+    JitStatus status = JitStatus::Compiling;
+    tsl::robin_map<size_t, Block, std::identity> code_blocks;
     const Block* current_blk{};
     BlockKey blk_key{};
     bool unimplemented = false;
@@ -172,7 +178,7 @@ public:
 
         if (new_block) {
             // Note: They key may change during compilation, so this needs to be first.
-            auto& blk = it->second;
+            auto& blk = it.value();
             blk.entry_key = blk_key;
             CompileBlock(blk);
         }
@@ -2523,8 +2529,6 @@ public:
     }
 
     void shfc(Ab a, Ab b, Cond cond) {
-        //NOT_IMPLEMENTED();
-        //return;
         ConditionPass(cond, [&] {
             const Reg64 value = rax;
             GetAcc(value, a.GetName());

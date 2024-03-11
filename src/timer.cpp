@@ -1,3 +1,4 @@
+#include <limits>
 #include "crash.h"
 #include "timer.h"
 #include "crash.h"
@@ -75,7 +76,7 @@ void Timer::UpdateMMIO() {
 
 u64 Timer::GetMaxSkip() const {
     if (pause || count_mode == CountMode::EventCount)
-        return Infinity;
+        return std::numeric_limits<u64>::max();
 
     if (counter == 0) {
         if (count_mode == CountMode::AutoRestart) {
@@ -83,7 +84,7 @@ u64 Timer::GetMaxSkip() const {
         } else if (count_mode == CountMode::FreeRunning) {
             return 0xFFFFFFFF;
         } else /*Single*/ {
-            return Infinity;
+            return std::numeric_limits<u64>::max();
         }
     }
 
@@ -111,10 +112,6 @@ void Timer::Skip(u64 ticks) {
     }
 
     UpdateMMIO();
-}
-
-Timer::Timer(CoreTiming& core_timing) {
-    core_timing.RegisterCallbacks(this);
 }
 
 } // namespace Teakra

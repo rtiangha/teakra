@@ -1,17 +1,17 @@
 #pragma once
+
 #include <array>
 #include <cstdio>
 #include <functional>
 #include <utility>
 #include <queue>
 #include "common_types.h"
-#include "core_timing.h"
 
 namespace Teakra {
 
-class Btdmp : public CoreTiming::Callbacks {
+class Btdmp {
 public:
-    Btdmp(CoreTiming& core_timing);
+    Btdmp();
     ~Btdmp();
 
     void Reset();
@@ -68,9 +68,9 @@ public:
         return 0;
     }
 
-    void Tick(u64 ticks) override;
-    u64 GetMaxSkip() const override;
-    void Skip(u64 ticks) override;
+    void Tick(u64 ticks);
+    u64 GetMaxSkip() const;
+    void Skip(u64 ticks);
 
     void SetAudioCallback(std::function<void(std::array<std::int16_t, 2>)> callback) {
         audio_callback = std::move(callback);

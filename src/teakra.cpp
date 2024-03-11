@@ -1,6 +1,4 @@
 #include <array>
-#include <atomic>
-#include <cassert>
 #include "ahbm.h"
 #include "apbp.h"
 #include "btdmp.h"
@@ -17,15 +15,15 @@
 namespace Teakra {
 
 struct Teakra::Impl {
-    CoreTiming core_timing;
+    std::array<Timer, 2> timer{};
+    std::array<Btdmp, 2> btdmp{};
+    CoreTiming core_timing{timer, btdmp};
     SharedMemory shared_memory;
     MemoryInterfaceUnit miu;
     ICU icu;
     Apbp apbp_from_cpu, apbp_from_dsp;
-    std::array<Timer, 2> timer{{{core_timing}, {core_timing}}};
     Ahbm ahbm;
     Dma dma{shared_memory, ahbm};
-    std::array<Btdmp, 2> btdmp{{{core_timing}, {core_timing}}};
     MMIORegion mmio{miu, icu, apbp_from_cpu, apbp_from_dsp, timer, dma, ahbm, btdmp};
     MemoryInterface memory_interface{shared_memory, miu};
     Processor processor;

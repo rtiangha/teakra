@@ -1,46 +1,45 @@
 #pragma once
 
-#include <algorithm>
-#include <functional>
-#include <limits>
-#include <vector>
+#include <array>
 #include "common_types.h"
+#include "btdmp.h"
+#include "timer.h"
 
 namespace Teakra {
 
 class CoreTiming {
 public:
-    class Callbacks {
-    public:
-        virtual ~Callbacks() = default;
-        virtual void Tick(u64) = 0;
-        virtual u64 GetMaxSkip() const = 0;
-        virtual void Skip(u64) = 0;
-        static constexpr u64 Infinity = std::numeric_limits<u64>::max();
-    };
+    CoreTiming(std::array<Timer, 2>& timer_, std::array<Btdmp, 2>& btdmp_) :
+          timer{timer_}, btdmp{btdmp_} {}
 
     void Tick(u64 ticks = 1) {
-        for (const auto& callbacks : registered_callbacks) {
-            callbacks->Tick(ticks);
-        }
+        timer[0].Tick(ticks);
+        timer[1].Tick(ticks);
+        btdmp[0].Tick(ticks);
+        btdmp[1].Tick(ticks);
     }
 
     u64 Skip(u64 maximum) {
-        u64 ticks = maximum;
-        for (const auto& callbacks : registered_callbacks) {
-            ticks = std::min(ticks, callbacks->GetMaxSkip());
-        }
-        for (const auto& callbacks : registered_callbacks) {
-            callbacks->Skip(ticks);
-        }
+        const u64 ticks = GetMaxSkip(maximum);
+        timer[0].Skip(ticks);
+        timer[1].Skip(ticks);
+        btdmp[0].Skip(ticks);
+        btdmp[1].Skip(ticks);
         return ticks;
     }
 
-    void RegisterCallbacks(Callbacks* callbacks) {
-        registered_callbacks.push_back(std::move(callbacks));
+    u64 GetMaxSkip(u64 maximum) {
+        u64 ticks = maximum;
+        ticks = std::min(ticks, timer[0].GetMaxSkip());
+        ticks = std::min(ticks, timer[1].GetMaxSkip());
+        ticks = std::min(ticks, btdmp[0].GetMaxSkip());
+        ticks = std::min(ticks, btdmp[1].GetMaxSkip());
+        return ticks;
     }
 
 private:
-    std::vector<Callbacks*> registered_callbacks;
+    std::array<Timer, 2>& timer;
+    std::array<Btdmp, 2>& btdmp;
 };
+
 } // namespace Teakra
