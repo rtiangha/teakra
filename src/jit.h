@@ -96,7 +96,7 @@ public:
     bool compiling = false;
     JitStatus status = JitStatus::Compiling;
     tsl::robin_map<size_t, Block, std::identity> code_blocks;
-    const Block* current_blk{};
+    Block* current_blk{};
     BlockKey blk_key{};
     bool unimplemented = false;
 
@@ -167,7 +167,7 @@ public:
 
         const size_t hash = Common::ComputeStructHash64(blk_key);
         auto [it, new_block] = code_blocks.try_emplace(hash);
-        current_blk = &it->second;
+        current_blk = &it.value();
 
         if (new_block) {
             // Note: They key may change during compilation, so this needs to be first.
@@ -2495,24 +2495,18 @@ public:
     }
 
     void rep(Imm8 a) {
-        /*u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         auto& decoder = decoders[opcode];
         u16 expand_value = 0;
         if (decoder.NeedExpansion()) {
             expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         }
 
-         for (int i = 0; i <= a.Unsigned16(); i++) {
-             decoder.call(*this, opcode, expand_value);
-             current_blk->cycles++;
-             ASSERT(compiling); // Ensure the instruction doesn't break the block
-         }*/
-
-        c.mov(word[REGS + offsetof(JitRegisters, rep)], true);
-        c.mov(word[REGS + offsetof(JitRegisters, repc)], a.Unsigned16());
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        compiling = false;
-        rep_end_locations.insert(regs.pc);
+        for (int i = 0; i <= a.Unsigned16(); i++) {
+            decoder.call(*this, opcode, expand_value);
+            current_blk->cycles++;
+            ASSERT(compiling); // Ensure the instruction doesn't break the block
+        }
     }
     void rep(Register a) {
         const Reg64 value = rax;
