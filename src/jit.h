@@ -11,6 +11,7 @@
 #include <tsl/robin_map.h>
 #include "bit.h"
 #include <set>
+#include <stack>
 #include "core_timing.h"
 #include "memory_interface.h"
 #include "interpreter.h"
@@ -29,6 +30,17 @@ static constexpr bool IsWindows() {
     return false;
 }
 #endif
+
+namespace Teakra::Disassembler {
+
+struct ArArpSettings {
+    std::array<std::uint16_t, 2> ar;
+    std::array<std::uint16_t, 4> arp;
+};
+
+std::string Do(std::uint16_t opcode, std::uint16_t expansion = 0,
+               std::optional<ArArpSettings> ar_arp = std::nullopt);
+}
 
 namespace Teakra {
 
@@ -96,6 +108,7 @@ public:
     bool compiling = false;
     JitStatus status = JitStatus::Compiling;
     tsl::robin_map<size_t, Block, std::identity> code_blocks;
+    std::stack<u32> call_stack;
     Block* current_blk{};
     BlockKey blk_key{};
     bool unimplemented = false;
@@ -189,13 +202,15 @@ public:
 
         // Check for interrupts.
         for (std::size_t i = 0; i < 3; ++i) {
-            if (interrupt_pending[i].exchange(false)) {
+            if (interrupt_pending[i]) {
                 regs.ip[i] = 1;
+                interrupt_pending[i] = false;
             }
         }
 
-        if (vinterrupt_pending.exchange(false)) {
+        if (vinterrupt_pending) {
             regs.ipv = 1;
+            vinterrupt_pending = false;
         }
 
         // Return the block function to execute.
@@ -252,6 +267,8 @@ public:
         c.mov(B[0], qword[REGS + offsetof(JitRegisters, b)]);
         c.mov(B[1], qword[REGS + offsetof(JitRegisters, b) + sizeof(u64)]);
         c.mov(FLAGS, word[REGS + offsetof(JitRegisters, flags)]);
+
+        call_stack = {};
 
         compiling = true;
         while (compiling) {
@@ -412,10 +429,10 @@ public:
 
     using instruction_return_type = void;
 
-    std::array<std::atomic<bool>, 3> interrupt_pending{{false, false, false}};
-    std::atomic<bool> vinterrupt_pending{false};
-    std::atomic<bool> vinterrupt_context_switch;
-    std::atomic<u32> vinterrupt_address;
+    std::array<bool, 3> interrupt_pending{};
+    bool vinterrupt_pending{false};
+    bool vinterrupt_context_switch;
+    u32 vinterrupt_address;
 
     void nop() {
         // literally nothing
@@ -2050,7 +2067,8 @@ public:
     }
 
     void call(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        const u32 ret_pc = regs.pc;
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], ret_pc);
         ConditionPass(cond, [&] {
             EmitPushPC();
             regs.pc = Address32(addr_low, addr_high);
@@ -2058,6 +2076,9 @@ public:
         });
         // For static jump we can continue compiling.
         compiling = cond.GetName() == CondValue::True;
+        if (compiling) {
+            call_stack.push(ret_pc);
+        }
     }
     void calla(Axl a) {
         NOT_IMPLEMENTED();
@@ -2071,7 +2092,8 @@ public:
         compiling = false;
     }
     void callr(RelAddr7 addr, Cond cond) {
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        const u32 ret_pc = regs.pc;
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], ret_pc);
         ConditionPass(cond, [&] {
             EmitPushPC();
             regs.pc += addr.Relative32();
@@ -2079,6 +2101,9 @@ public:
         });
         // For static jump we can continue compiling.
         compiling = cond.GetName() == CondValue::True;
+        if (compiling) {
+            call_stack.push(ret_pc);
+        }
     }
 
     void cntx_s() {
@@ -2134,6 +2159,13 @@ public:
         ConditionPass(cond, [&] {
             EmitPopPC();
         });
+        // If the last call instruction had a static target and this instruction
+        // always returns, we don't have to stop compiling.
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retd() {
@@ -2145,6 +2177,11 @@ public:
             EmitPopPC();
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
         });
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retic(Cond cond) {
@@ -2154,6 +2191,11 @@ public:
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
             cntx_r();
         });
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retid() {
@@ -2165,6 +2207,11 @@ public:
     void rets(Imm8 a) {
         EmitPopPC();
         c.add(word[REGS + offsetof(JitRegisters, sp)], a.Unsigned16());
+        if (!call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
 
