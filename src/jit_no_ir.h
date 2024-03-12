@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <xbyak/xbyak.h>
-#include <tsl/robin_map.h>
 #include "bit.h"
 #include <set>
 #include <stack>
@@ -54,9 +53,12 @@ struct alignas(16) StackLayout {
 };
 
 class EmitX64 {
+    // Technically there's prpage which would make this 22 bits wide, but it's always zero so whatever.
+    static constexpr size_t BlockCacheSize = 1ULL << 18;
 public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
         : core_timing(core_timing), regs(regs), mem(mem), c(MAX_CODE_SIZE) {
+        block_cache = std::make_unique<BlockList[]>(BlockCacheSize);
         EmitDispatcher();
     }
 
@@ -82,11 +84,17 @@ public:
         Cfg cfgib, cfgjb;
         u16 stepi0b, stepj0b;
         u32 pc;
+        u32 pad;
+
+        FORCE_INLINE bool operator==(const BlockKey& other) const {
+            return std::memcmp(this, &other, sizeof(BlockKey)) == 0;
+        }
     };
+
+    static_assert(sizeof(BlockKey) == 64);
 
     struct Block {
         BlockFunc func;
-        BlockKey entry_key;
         s32 cycles;
     };
 
@@ -107,7 +115,8 @@ public:
     std::set<u32> rep_end_locations;
     bool compiling = false;
     JitStatus status = JitStatus::Compiling;
-    tsl::robin_map<size_t, Block, std::identity> code_blocks;
+    using BlockList = std::vector<std::pair<BlockKey, Block>>;
+    std::unique_ptr<BlockList[]> block_cache;
     std::stack<u32> call_stack;
     Block* current_blk{};
     BlockKey blk_key{};
@@ -118,7 +127,7 @@ public:
         regs.Reset();
 
         // Clear any program data from previous runs
-        code_blocks.clear();
+        block_cache = std::make_unique<BlockList[]>(BlockCacheSize);
         bkrep_end_locations.clear();
         rep_end_locations.clear();
 
@@ -178,17 +187,7 @@ public:
         std::memcpy(&blk_key.shadow.mod1, &regs.mod1b, sizeof(u16) * 3);
         std::memcpy(&blk_key.shadow.arp, &regs.arpb, sizeof(regs.arpb) + sizeof(regs.arb));
 
-        const size_t hash = Common::ComputeStructHash64(blk_key);
-        auto [it, new_block] = code_blocks.try_emplace(hash);
-        current_blk = &it.value();
-
-        if (new_block) {
-            // Note: They key may change during compilation, so this needs to be first.
-            auto& blk = it.value();
-            blk.entry_key = blk_key;
-            CompileBlock(blk);
-            //printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
-        }
+        LookupBlock();
 
         // Check if we are idle, and skip ahead
         if (regs.idle) {
@@ -220,6 +219,23 @@ public:
 
     static void DoInterruptsAndRunDebugThunk(void* this_ptr) {
         reinterpret_cast<EmitX64*>(this_ptr)->DoInterruptsAndRunDebug();
+    }
+
+    FORCE_INLINE void LookupBlock() {
+        auto& vec = block_cache[regs.pc];
+        for (auto& [key, block] : vec) {
+            if (key == blk_key) {
+                current_blk = &block;
+                return;
+            }
+        }
+
+        // Note: They key may change during compilation, so this needs to be first.
+        auto& [key, blk] = vec.emplace_back();
+        key = blk_key;
+        current_blk = &blk;
+        CompileBlock(blk);
+        //printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
     }
 
     void DoInterruptsAndRunDebug() {

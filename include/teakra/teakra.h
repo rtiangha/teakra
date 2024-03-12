@@ -81,7 +81,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_jit;
     std::unique_ptr<Impl> impl_interp;
-    bool use_jit;
     Impl* impl;
+    bool use_jit;
 };
 } // namespace Teakra
