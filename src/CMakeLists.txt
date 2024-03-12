@@ -50,8 +50,8 @@ add_library(teakra
     #ir/value.cpp
     #ir/value.h
     #ir/opcode.h
-    jit.cpp
-    jit.h
+    jit_no_ir.cpp
+    jit_no_ir.h
     jit_regs.h
     cityhash.cpp
     cityhash.h

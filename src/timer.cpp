@@ -82,7 +82,7 @@ u64 Timer::GetMaxSkip() const {
         if (count_mode == CountMode::AutoRestart) {
             return ((u32)start_high << 16) | start_low;
         } else if (count_mode == CountMode::FreeRunning) {
-            return 0xFFFFFFFF;
+            return std::numeric_limits<u32>::max();
         } else /*Single*/ {
             return std::numeric_limits<u64>::max();
         }
@@ -100,7 +100,7 @@ void Timer::Skip(u64 ticks) {
         if (count_mode == CountMode::AutoRestart) {
             reset = ((u32)start_high << 16) | start_low;
         } else if (count_mode == CountMode::FreeRunning) {
-            reset = 0xFFFFFFFF;
+            reset = std::numeric_limits<u32>::max();
         } else {
             return;
         }

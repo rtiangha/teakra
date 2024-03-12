@@ -187,6 +187,7 @@ public:
             auto& blk = it.value();
             blk.entry_key = blk_key;
             CompileBlock(blk);
+            printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
         }
 
         // Check if we are idle, and skip ahead
@@ -270,6 +271,10 @@ public:
 
         call_stack = {};
 
+        Disassembler::ArArpSettings settings;
+        std::memcpy(&settings.ar, &blk_key.curr.ar, sizeof(settings.ar));
+        std::memcpy(&settings.arp, &blk_key.curr.arp, sizeof(settings.arp));
+
         compiling = true;
         while (compiling) {
             const u32 current_pc = regs.pc;
@@ -300,6 +305,9 @@ public:
             if (bkrep_end_locations.contains(regs.pc - 1)) {
                 EmitBkrepReturn(regs.pc);
             }
+
+            const auto name = Disassembler::Do(opcode, expand_value, settings);
+            printf("%s\n", name.c_str());
         }
 
         // Flush block state

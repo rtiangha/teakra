@@ -22,7 +22,7 @@ class Processor;
 
 class Teakra {
 public:
-    Teakra(bool use_jit);
+    Teakra(bool use_jit = false);
     ~Teakra();
 
     Processor& GetProcessor();
@@ -71,7 +71,7 @@ public:
     void AHBMWrite32(std::uint32_t addr, std::uint32_t value);
 
     // core
-    unsigned Run(unsigned cycle);
+    std::uint32_t Run(std::uint32_t cycle);
 
     void SetAHBMCallback(const AHBMCallback& callback);
 

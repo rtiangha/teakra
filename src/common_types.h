@@ -13,7 +13,7 @@ using s32 = std::int32_t;
 using s64 = std::int64_t;
 
 // Inlining
-#ifdef _WIN32
+#ifdef _MSC_VER
 #define FORCE_INLINE __forceinline
 #else
 #define FORCE_INLINE inline __attribute__((always_inline))
