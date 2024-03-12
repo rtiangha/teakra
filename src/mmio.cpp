@@ -9,6 +9,7 @@
 #include "memory_interface.h"
 #include "mmio.h"
 #include "timer.h"
+#include "jit_regs.h"
 
 namespace Teakra {
 
@@ -37,6 +38,18 @@ struct BitFieldSlot {
         BitFieldSlot slot{pos, length, {}, {}};
         slot.set = [&var](u16 value) { var = static_cast<T>(value); };
         slot.get = [&var]() -> u16 { return static_cast<u16>(var); };
+        return slot;
+    }
+
+    template <typename T>
+    static BitFieldSlot PtrSlot(unsigned pos, unsigned length, T*& var) {
+        static_assert(
+            std::is_same_v<u16,
+                           typename std::conditional_t<std::is_enum_v<T>, std::underlying_type<T>,
+                                                       std::enable_if<true, T>>::type>);
+        BitFieldSlot slot{pos, length, {}, {}};
+        slot.set = [&var](u16 value) { *var = static_cast<T>(value); };
+        slot.get = [&var]() -> u16 { return static_cast<u16>(*var); };
         return slot;
     }
 };
@@ -234,9 +247,24 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
     // impl->cells[0x106]; // MIU_Z1WSCFG
     // impl->cells[0x108]; // MIU_Z2WSCFG
     // impl->cells[0x10C]; // MIU_Z3WSCFG
-    impl->cells[0x10E] = Cell::RefCell(miu.x_page); // MIU_XPAGE
-    impl->cells[0x110] = Cell::RefCell(miu.y_page); // MIU_YPAGE
-    impl->cells[0x112] = Cell::RefCell(miu.z_page); // MIU_ZPAGE
+    impl->cells[0x10E].get = [&miu]() -> u16 { return miu.x_page; }; // MIU_XPAGE
+    impl->cells[0x10E].set = [&miu, this](u16 value) {
+        miu.x_page = value;
+        *miu.x_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.x_page * MemoryInterfaceUnit::DataMemoryBankSize;
+    };
+
+    impl->cells[0x110].get = [&miu]() -> u16 { return miu.y_page; }; // MIU_YPAGE
+    impl->cells[0x110].set = [&miu, this](u16 value) {
+        miu.y_page = value;
+        *miu.y_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.y_page * MemoryInterfaceUnit::DataMemoryBankSize;
+    };
+
+    impl->cells[0x112].get = [&miu]() -> u16 { return miu.z_page; }; // MIU_ZPAGE
+    impl->cells[0x112].set = [&miu, this](u16 value) {
+        miu.z_page = value;
+        *miu.z_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.z_page * MemoryInterfaceUnit::DataMemoryBankSize;
+    };
+
     impl->cells[0x114] = Cell::BitFieldCell({
         // MIU_PAGE0CFG
         BitFieldSlot::RefSlot(0, 6, miu.x_size[0]),
@@ -253,10 +281,12 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
         BitFieldSlot{1, 1, {}, {}},                 // TESTP
         BitFieldSlot{2, 1, {}, {}},                 // INTP
         BitFieldSlot{4, 1, {}, {}},                 // ZSINGLEP
-        BitFieldSlot::RefSlot(6, 1, miu.page_mode), // PAGEMODE
+        BitFieldSlot::PtrSlot(6, 1, miu.page_mode), // PAGEMODE
     });
     // impl->cells[0x11C]; // MIU_DLCFG
-    impl->cells[0x11E] = Cell::RefCell(miu.mmio_base); // MIU_MMIOBASE
+    impl->cells[0x11E].get = [&miu]() -> u16 { return *miu.mmio_base; }; // MIU_MMIOBASE
+    impl->cells[0x11E].set = [&miu](u16 value) { *miu.mmio_base = value; };
+
     // impl->cells[0x120]; // MIU_OBSCFG
     // impl->cells[0x122]; // MIU_POLARITY
 
@@ -358,4 +388,5 @@ u16 MMIORegion::Read(u16 addr) {
 void MMIORegion::Write(u16 addr, u16 value) {
     impl->cells[addr].set(value);
 }
+
 } // namespace Teakra

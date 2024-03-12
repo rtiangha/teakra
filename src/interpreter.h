@@ -12,6 +12,7 @@
 #include "decoder.h"
 #include "memory_interface.h"
 #include "operand.h"
+#include "mmio.h"
 #include "register.h"
 
 namespace Teakra {

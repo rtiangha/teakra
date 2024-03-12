@@ -7,6 +7,7 @@
 #include "crash.h"
 #include "bit_field.h"
 #include "common_types.h"
+#include "memory_interface.h"
 #include <xbyak/xbyak.h>
 
 namespace Teakra {
@@ -318,6 +319,8 @@ union Cfg {
     }
 };
 
+class MemoryInterfaceUnit;
+
 // NOTE: The jit relies heavily on the member order, do not swap!
 struct JitRegisters {
     JitRegisters() {
@@ -333,6 +336,12 @@ struct JitRegisters {
     void Reset() {
         *this = JitRegisters();
     }
+
+    u32 x_offset = MemoryInterfaceUnit::DataMemoryOffset;
+    u32 y_offset = MemoryInterfaceUnit::DataMemoryOffset;
+    u32 z_offset = MemoryInterfaceUnit::DataMemoryOffset;
+    u16 page_mode = 0;
+    u16 mmio_base = 0x8000;
 
     /** Program control unit **/
 

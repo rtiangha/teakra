@@ -83,10 +83,10 @@ public:
 private:
     // TODO: figure out the relation between clock_config and period.
     // Default to period = 4096 for now which every game uses
-    u16 transmit_clock_config = 0;
-    u16 transmit_period = 4096;
-    u16 transmit_timer = 0;
-    u16 transmit_enable = 0;
+    u32 transmit_clock_config = 0;
+    u32 transmit_period = 4096;
+    u32 transmit_timer = 0;
+    u32 transmit_enable = 0;
     bool transmit_empty = true;
     bool transmit_full = false;
     std::queue<u16> transmit_queue;

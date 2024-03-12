@@ -16,6 +16,7 @@
 #include "interpreter.h"
 #include "operand.h"
 #include "hash.h"
+#include "mmio.h"
 #include "jit_regs.h"
 #include "register.h"
 #include "xbyak_abi.h"
@@ -59,6 +60,10 @@ public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
         : core_timing(core_timing), regs(regs), mem(mem), c(MAX_CODE_SIZE) {
         block_cache = std::make_unique<BlockList[]>(BlockCacheSize);
+        auto& miu = mem.memory_interface_unit;
+        miu.SetOffsets(&regs.x_offset, &regs.y_offset, &regs.z_offset);
+        miu.SetPageMode(&regs.page_mode);
+        miu.SetMmioBase(&regs.mmio_base);
         EmitDispatcher();
     }
 
@@ -230,7 +235,6 @@ public:
             }
         }
 
-        // Note: They key may change during compilation, so this needs to be first.
         auto& [key, blk] = vec.emplace_back();
         key = blk_key;
         current_blk = &blk;
@@ -407,18 +411,20 @@ public:
     }
 
     void EmitPopPC() {
-        const Reg16 sp = bx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 sp = rbx;
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 pc = rcx;
         c.xor_(pc, pc);
         if (regs.cpc == 1) {
             NOT_IMPLEMENTED();
         } else {
-            LoadFromMemory(pc, sp);
+            EmitLoadFromMemory<true>(pc, sp);
+            c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
             c.add(sp, 1);
             c.shl(pc, 16);
-            LoadFromMemory(pc, sp);
-            c.add(sp, 1);
+            EmitLoadFromMemory<true>(pc, sp);
+            c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
+            c.add(sp, 2);
         }
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], pc.cvt32());
@@ -568,6 +574,87 @@ public:
 
     static u16 MemDataReadThunk(void* mem_ptr, u16 address) {
         return reinterpret_cast<MemoryInterface*>(mem_ptr)->DataRead(address);
+    }
+
+    void EmitLoadFunctionCall(Reg64 out, Reg64 address) {
+        // TODO: Non MMIO reads can be performed inside the JIT.
+        // Push all registers because our JIT assumes everything is non volatile
+        c.push(rbp);
+        c.push(rbx);
+        c.push(rcx);
+        c.push(rdx);
+        c.push(rsi);
+        c.push(rdi);
+        c.push(r8);
+        c.push(r9);
+        c.push(r10);
+        c.push(r11);
+        c.push(r12);
+        c.push(r13);
+        c.push(r14);
+        c.push(r15);
+
+        c.mov(rbp, rsp);
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        c.sub(rsp, 64);
+        c.and_(rsp, ~0xF);
+
+        c.movzx(ABI_PARAM2, address.cvt16());
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
+        CallFarFunction(c, MemDataReadThunk);
+
+        // Undo anything we did
+        c.mov(rsp, rbp);
+        c.pop(r15);
+        c.pop(r14);
+        c.pop(r13);
+        c.pop(r12);
+        c.pop(r11);
+        c.pop(r10);
+        c.pop(r9);
+        c.pop(r8);
+        c.pop(rdi);
+        c.pop(rsi);
+        c.pop(rdx);
+        c.pop(rcx);
+        c.pop(rbx);
+        c.pop(rbp);
+        c.mov(out.cvt16(), ABI_RETURN.cvt16());
+    }
+
+    void EmitConvertAddress(Reg64 addr, Reg64 scratch) {
+        // NOTE: This assumes x_size[0] is always 0x1E!
+        c.mov(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, x_offset)]);
+        c.cmp(addr, 0x1E * MemoryInterfaceUnit::XYSizeResolution);
+        c.cmovg(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, y_offset)]);
+        c.cmp(word[REGS + offsetof(JitRegisters, page_mode)], 0);
+        c.cmove(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, z_offset)]);
+        c.add(addr, scratch);
+    }
+
+    template <bool bypass_mmio = false>
+    void EmitLoadFromMemory(Reg64 out, Reg64 address) {
+        Xbyak::Label end_label, read_label;
+        const Reg64 scratch = rsi;
+        if constexpr (!bypass_mmio) {
+            c.movzx(scratch, word[REGS + offsetof(JitRegisters, mmio_base)]);
+            c.cmp(address, scratch);
+            c.jl(read_label);
+            c.add(scratch, MemoryInterfaceUnit::MMIOSize);
+            c.cmp(address, scratch);
+            c.jge(read_label);
+            EmitLoadFunctionCall(out, address);
+            c.jmp(end_label);
+            c.L(read_label);
+        }
+
+        EmitConvertAddress(address, scratch);
+        c.mov(scratch, reinterpret_cast<uintptr_t>(mem.shared_memory.raw.data()));
+        c.mov(out.cvt16(), word[scratch + address * 2]);
+
+        if constexpr (!bypass_mmio) {
+            c.L(end_label);
+        }
     }
 
     void LoadFromMemory(Reg64 out, MemImm8 addr) {
@@ -849,7 +936,9 @@ public:
 
     void alm(Alm op, MemImm8 a, Ax b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a);
+        const Reg64 address = rcx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -857,7 +946,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -894,17 +983,19 @@ public:
 
     void alu(Alu op, MemImm16 a, Ax b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16());
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16());
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
         const Reg64 address = rax;
         const Reg64 value = rbx;
-
         RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
         c.add(address, a.Unsigned16());
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -936,10 +1027,12 @@ public:
         }
     }
     void alu(Alu op, MemR7Imm7s a, Ax b) {
-        RegToBus16(RegName::r7, rax);
-        c.add(eax, a.Signed16());
+        const Reg64 address = rax;
+        RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
+        c.add(address.cvt32(), a.Signed16());
         const Reg64 value = rbx;
-        LoadFromMemory(value, rax);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -1161,7 +1254,9 @@ public:
 
     void alb(Alb op, Imm16 a, MemImm8 b) {
         const Reg64 bv = rax;
-        LoadFromMemory(bv, b.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, b.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(bv, address);
         const Reg64 result = rbx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
         if (IsAlbModifying(op)) {
@@ -1172,7 +1267,7 @@ public:
         const Reg64 address = rbx;
         RnAddressAndModify(b.Index(), bs.GetName(), address);
         const Reg64 bv = rax;
-        LoadFromMemory(bv, address);
+        EmitLoadFromMemory(bv, address);
         const Reg64 result = rcx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
         if (IsAlbModifying(op)) {
@@ -1651,6 +1746,7 @@ public:
 
     static void PrintValue(u64 value, const char* fmt) {
         printf(fmt, value);
+        std::fflush(stdout);
     }
 
     template <typename T>
@@ -2451,21 +2547,19 @@ public:
 
     void pop(Register a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(a.GetName(), value);
     }
     void pop(Abe a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
         const Reg32 tmp = eax; // Register used just for truncating the accumulator register to 32 bits
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.movsx(value.cvt32(), value.cvt8());
         c.shl(value, 32);
         // Zero-extend bottom 32 bits of accumulator to tmp.cvt64() and merge it into value
@@ -2475,11 +2569,10 @@ public:
     }
     void pop(ArArpSttMod a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(a.GetName(), value);
     }
     void pop(Bx a) {
@@ -2502,51 +2595,46 @@ public:
     }
     void pop_r6() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(RegName::r6, value);
     }
     void pop_repc() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
     }
     void pop_x0() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
     }
     void pop_x1() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 48);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 16);
     }
     void pop_y1() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 16);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 48);
@@ -2616,7 +2704,9 @@ public:
     }
     void tstb(MemImm8 a, Imm4 b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
@@ -2627,7 +2717,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
@@ -2711,7 +2801,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(x.Index(), xs.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
@@ -2730,9 +2820,9 @@ public:
         const Reg64 address_x = rbx;
         RnAddressAndModify(y.Index(), ys.GetName(), address_y);
         RnAddressAndModify(x.Index(), xs.GetName(), address_x);
-        LoadFromMemory(FACTORS, address_y);
+        EmitLoadFromMemory(FACTORS, address_y);
         c.rorx(FACTORS, FACTORS, 32);
-        LoadFromMemory(FACTORS, address_x);
+        EmitLoadFromMemory(FACTORS, address_x);
         c.rorx(FACTORS, FACTORS, 32);
         MulGeneric(op.GetName(), a);
     }
@@ -2741,7 +2831,9 @@ public:
     }
     void mul_y0(Mul2 op, MemImm8 x, Ax a) {
         const Reg64 x0 = rax;
-        LoadFromMemory(x0, x);
+        const Reg64 address = rbx;
+        c.mov(address, x.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(x0, address);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), x0.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
@@ -2975,17 +3067,23 @@ public:
 
     void mov(MemImm16 a, Ax b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16());
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16());
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ab b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ablh b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_eu(MemImm8 a, Axh b) {
@@ -2993,12 +3091,16 @@ public:
     }
     void mov(MemImm8 a, RnOld b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_sv(MemImm8 a) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
     }
     void mov_dvm_to(Ab b) {
@@ -3037,30 +3139,32 @@ public:
         const Reg64 value = rax;
         const Reg64 address = rbx;
         RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
         c.add(address, a.Unsigned16());
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm7s a, Ax b) {
         const Reg64 address = rax;
         RegToBus16(RegName::r7, address);
-        c.add(address, a.Signed16());
+        c.movzx(address, address.cvt16());
+        c.add(address.cvt32(), ::SignExtend<16, u32>(a.Signed16()));
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Bx b) {
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Register b) {
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_memsp_to(Register b) {
@@ -3323,9 +3427,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
         const Reg64 value = rcx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.shl(value, 16);
-        LoadFromMemory(value, address2);
+        EmitLoadFromMemory(value, address2);
         ProductFromBus32(b, value.cvt32());
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
@@ -3351,9 +3455,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
         const Reg64 value = rcx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.ror(value.cvt32(), 16);
-        LoadFromMemory(value, address2);
+        EmitLoadFromMemory(value, address2);
         c.movsxd(value, value.cvt32());
         SatAndSetAccAndFlag(b.GetName(), value);
     }
@@ -3434,7 +3538,7 @@ public:
         GetAndSatAccNoFlag(value, a.GetName());
         c.shr(value, 16);
         StoreToMemory(i, value);
-        LoadFromMemory(value, j);
+        EmitLoadFromMemory(value, j);
         c.shl(value, 16);
         SignExtend(value, 32);
         SetAcc(a.GetName(), value);
@@ -3445,7 +3549,9 @@ public:
 
     void movs(MemImm8 a, Ab b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         SignExtend(value, 16);
         const Reg16 sv = cx;
         c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
@@ -3455,7 +3561,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rax;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         SignExtend(value, 16);
         const Reg16 sv = cx;
         c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
@@ -3822,18 +3928,18 @@ public:
         c.mov(x2, x);
         OffsetAddress(ui, x2.cvt16(), oi, dmodi);
         const Reg64 factors = rcx;
-        LoadFromMemory(factors, x2);
+        EmitLoadFromMemory<true>(factors, x2);
         c.shl(factors, 16);
-        LoadFromMemory(factors, x);
+        EmitLoadFromMemory<true>(factors, x);
         c.shl(factors, 16);
         const Reg64 y = x;
         RnAddressAndModify(uj, sj, y, dmodj);
         const Reg64 y2 = x2;
         c.mov(y2, y);
         OffsetAddress(uj, y2.cvt16(), oj, dmodj);
-        LoadFromMemory(factors, y2);
+        EmitLoadFromMemory<true>(factors, y2);
         c.shl(factors, 16);
-        LoadFromMemory(factors, y);
+        EmitLoadFromMemory<true>(factors, y);
         c.mov(FACTORS, factors);
         DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
         DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
@@ -3862,9 +3968,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(xs));
         c.rorx(FACTORS, FACTORS, 32);
-        LoadFromMemory(FACTORS, address);
+        EmitLoadFromMemory<true>(FACTORS, address);
         c.rorx(FACTORS, FACTORS, 16);
-        LoadFromMemory(FACTORS, address2);
+        EmitLoadFromMemory<true>(FACTORS, address2);
         c.rorx(FACTORS, FACTORS, 16);
         DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
         DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
