@@ -127,6 +127,32 @@ public:
     BlockKey blk_key{};
     bool unimplemented = false;
 
+    // Emit a call to a class member function, passing "this_object" (+ an adjustment if necessary)
+    // As the function's "this" pointer. Only works with classes with single, non-virtual
+    // inheritance, hence the static asserts. Those are all we need though, thankfully.
+    template <typename T>
+    void CallMemberFunction(T func, void* this_object) {
+        void* function_ptr;
+        uintptr_t this_ptr = reinterpret_cast<uintptr_t>(this_object);
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+        static_assert(sizeof(T) == 8, "[x64 JIT] Invalid size for member function pointer");
+        std::memcpy(&function_ptr, &func, sizeof(T));
+#else
+        static_assert(sizeof(T) == 16, "[x64 JIT] Invalid size for member function pointer");
+        uint64_t arr[2];
+        std::memcpy(arr, &func, sizeof(T));
+        // First 8 bytes correspond to the actual pointer to the function
+        function_ptr = reinterpret_cast<void*>(arr[0]);
+        // Next 8 bytes correspond to the "this" pointer adjustment
+        this_ptr += arr[1];
+#endif
+
+        // Load the "this" pointer to arg1 and emit a call to the function
+        c.mov(ABI_PARAM1, this_ptr);
+        CallFarFunction(c, function_ptr);
+    }
+
     void Reset() {
         // Reset registers
         regs.Reset();
@@ -157,24 +183,18 @@ public:
         c.L(dispatcher_start);
 
         // Call LookupBlock. This will compile a new block and increment timers for us
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
-        CallFarFunction(c, LookupNewBlockThunk);
+        CallMemberFunction(&EmitX64::LookupNewBlock, this);
         c.test(ABI_RETURN, ABI_RETURN);
         c.jz(dispatcher_end);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&regs));
         c.jmp(ABI_RETURN);
         c.L(block_exit);
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
-        CallFarFunction(c, DoInterruptsAndRunDebugThunk);
+        CallMemberFunction(&EmitX64::DoInterruptsAndRunDebug, this);
         c.jmp(dispatcher_start);
         c.L(dispatcher_end);
         ABI_PopRegistersAndAdjustStack(c, ABI_ALL_CALLEE_SAVED, 8, 16);
         c.ret();
         c.ready();
-    }
-
-    static BlockFunc LookupNewBlockThunk(void* this_ptr) {
-        return reinterpret_cast<EmitX64*>(this_ptr)->LookupNewBlock();
     }
 
     BlockFunc LookupNewBlock() {
@@ -220,10 +240,6 @@ public:
 
         // Return the block function to execute.
         return current_blk->func;
-    }
-
-    static void DoInterruptsAndRunDebugThunk(void* this_ptr) {
-        reinterpret_cast<EmitX64*>(this_ptr)->DoInterruptsAndRunDebug();
     }
 
     FORCE_INLINE void LookupBlock() {
