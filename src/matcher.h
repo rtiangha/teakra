@@ -17,8 +17,6 @@ struct Rejector {
     }
 };
 
-extern std::unordered_map<std::string, u32> call_count;
-
 template <typename Visitor>
 class Matcher {
 public:
@@ -61,7 +59,6 @@ public:
 
     handler_return_type call(Visitor& v, u16 instruction, u16 instruction_expansion = 0) const {
         ASSERT(Matches(instruction));
-        call_count[identifier]++;
         return fn(v, instruction, instruction_expansion);
     }
 

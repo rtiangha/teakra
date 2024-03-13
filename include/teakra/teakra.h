@@ -22,14 +22,13 @@ class Processor;
 
 class Teakra {
 public:
-    Teakra();
+    Teakra(bool use_jit = false);
     ~Teakra();
 
     Processor& GetProcessor();
     void Reset();
 
     std::array<std::uint8_t, 0x80000>& GetDspMemory();
-    std::array<std::uint8_t, 0x80000>& GetInterpDspMemory();
     const std::array<std::uint8_t, 0x80000>& GetDspMemory() const;
 
     // APBP Data
@@ -72,7 +71,7 @@ public:
     void AHBMWrite32(std::uint32_t addr, std::uint32_t value);
 
     // core
-    void Run(unsigned cycle);
+    std::uint32_t Run(std::uint32_t cycle);
 
     void SetAHBMCallback(const AHBMCallback& callback);
 
@@ -80,7 +79,9 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl;
+    std::unique_ptr<Impl> impl_jit;
     std::unique_ptr<Impl> impl_interp;
+    Impl* impl;
+    bool use_jit;
 };
 } // namespace Teakra

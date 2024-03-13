@@ -2,7 +2,6 @@
 #include "shared_memory.h"
 #include <utility>
 #include <atomic>
-#include <stdexcept>
 #include <tuple>
 #include <optional>
 #include <type_traits>
@@ -10,13 +9,14 @@
 #include <unordered_set>
 #include <xbyak/xbyak.h>
 #include "bit.h"
-#include <bit>
 #include <set>
+#include <stack>
 #include "core_timing.h"
 #include "memory_interface.h"
 #include "interpreter.h"
 #include "operand.h"
 #include "hash.h"
+#include "mmio.h"
 #include "jit_regs.h"
 #include "register.h"
 #include "xbyak_abi.h"
@@ -31,6 +31,17 @@ static constexpr bool IsWindows() {
 }
 #endif
 
+namespace Teakra::Disassembler {
+
+struct ArArpSettings {
+    std::array<std::uint16_t, 2> ar;
+    std::array<std::uint16_t, 4> arp;
+};
+
+std::string Do(std::uint16_t opcode, std::uint16_t expansion = 0,
+               std::optional<ArArpSettings> ar_arp = std::nullopt);
+}
+
 namespace Teakra {
 
 constexpr size_t MAX_CODE_SIZE = 256 * 1024 * 1024;
@@ -43,9 +54,16 @@ struct alignas(16) StackLayout {
 };
 
 class EmitX64 {
+    // Technically there's prpage which would make this 22 bits wide, but it's always zero so whatever.
+    static constexpr size_t BlockCacheSize = 1ULL << 18;
 public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
         : core_timing(core_timing), regs(regs), mem(mem), c(MAX_CODE_SIZE) {
+        block_cache = std::make_unique<BlockList[]>(BlockCacheSize);
+        auto& miu = mem.memory_interface_unit;
+        miu.SetOffsets(&regs.x_offset, &regs.y_offset, &regs.z_offset);
+        miu.SetPageMode(&regs.page_mode);
+        miu.SetMmioBase(&regs.mmio_base);
         EmitDispatcher();
     }
 
@@ -55,8 +73,8 @@ public:
     using BlockFunc = void(*)(JitRegisters*);
 
     struct BlockSwapState {
-        Mod0 mod0{};
         Mod1 mod1{};
+        Mod0 mod0{};
         Mod2 mod2{};
         std::array<ArpU, 4> arp{};
         std::array<ArU, 2> ar{};
@@ -66,24 +84,34 @@ public:
     struct BlockKey {
         BlockSwapState curr{};
         BlockSwapState shadow{};
-        u16 stepi0, stepj0;
-        u16 stepi0b, stepj0b;
         Cfg cfgi, cfgj;
+        u16 stepi0, stepj0;
         Cfg cfgib, cfgjb;
+        u16 stepi0b, stepj0b;
         u32 pc;
+        u32 pad;
+
+        FORCE_INLINE bool operator==(const BlockKey& other) const {
+            return std::memcmp(this, &other, sizeof(BlockKey)) == 0;
+        }
     };
+
+    static_assert(sizeof(BlockKey) == 64);
 
     struct Block {
         BlockFunc func;
-        BlockKey entry_key;
         s32 cycles;
+    };
+
+    enum JitStatus {
+        Compiling = 0,
+        EndStaticJump = 1,
+        EndDynJump = 2,
     };
 
     CoreTiming& core_timing;
     JitRegisters& regs;
-    RegisterState* iregs;
     MemoryInterface& mem;
-    Interpreter* debug_interp;
     Xbyak::CodeGenerator c;
     s32 cycles_remaining;
     Xbyak::Label block_exit;
@@ -91,8 +119,11 @@ public:
     std::set<u32> bkrep_end_locations;
     std::set<u32> rep_end_locations;
     bool compiling = false;
-    std::unordered_map<size_t, Block, std::identity> code_blocks;
-    const Block* current_blk{};
+    JitStatus status = JitStatus::Compiling;
+    using BlockList = std::vector<std::pair<BlockKey, Block>>;
+    std::unique_ptr<BlockList[]> block_cache;
+    std::stack<u32> call_stack;
+    Block* current_blk{};
     BlockKey blk_key{};
     bool unimplemented = false;
 
@@ -101,7 +132,7 @@ public:
         regs.Reset();
 
         // Clear any program data from previous runs
-        code_blocks.clear();
+        block_cache = std::make_unique<BlockList[]>(BlockCacheSize);
         bkrep_end_locations.clear();
         rep_end_locations.clear();
 
@@ -110,15 +141,12 @@ public:
         EmitDispatcher();
     }
 
-    void Run(s64 cycles, Interpreter* debug_interp_) {
+    u32 Run(s64 cycles) {
         cycles_remaining = cycles;
-        debug_interp = debug_interp_;
-        iregs = &debug_interp->regs;
-        debug_interp->total_cycles = cycles;
         current_blk = nullptr;
-        debug_interp->idle = false;
         regs.idle = false;
         run_code(this);
+        return std::abs(cycles_remaining);
     }
 
     void EmitDispatcher() {
@@ -128,7 +156,7 @@ public:
         Xbyak::Label dispatcher_start, dispatcher_end;
         c.L(dispatcher_start);
 
-               // Call LookupBlock. This will compile a new block and increment timers for us
+        // Call LookupBlock. This will compile a new block and increment timers for us
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(this));
         CallFarFunction(c, LookupNewBlockThunk);
         c.test(ABI_RETURN, ABI_RETURN);
@@ -149,64 +177,24 @@ public:
         return reinterpret_cast<EmitX64*>(this_ptr)->LookupNewBlock();
     }
 
-    int count = 0;
-
     BlockFunc LookupNewBlock() {
         if (cycles_remaining <= 0) {
             return nullptr;
         }
 
-               // Lookup and compile next block
+        // State for bank exchange.
         blk_key.pc = regs.pc;
+        std::memcpy(&blk_key.cfgi, &regs.cfgi, sizeof(u16) * 8);
+        // Current state
+        std::memcpy(&blk_key.curr.mod1, &regs.mod1, sizeof(u16) * 3);
+        std::memcpy(&blk_key.curr.arp, &regs.arp, sizeof(regs.arp) + sizeof(regs.ar));
+        // Shadow state.
+        std::memcpy(&blk_key.shadow.mod1, &regs.mod1b, sizeof(u16) * 3);
+        std::memcpy(&blk_key.shadow.arp, &regs.arpb, sizeof(regs.arpb) + sizeof(regs.arb));
 
-               // State for bank exchange.
-        blk_key.cfgi.raw = regs.cfgi.raw & Cfg::Mask();
-        blk_key.cfgj.raw = regs.cfgj.raw & Cfg::Mask();
-        blk_key.cfgib.raw = regs.cfgib.raw & Cfg::Mask();
-        blk_key.cfgjb.raw = regs.cfgjb.raw & Cfg::Mask();
-        blk_key.stepi0 = regs.stepi0;
-        blk_key.stepj0 = regs.stepj0;
-        blk_key.stepi0b = regs.stepi0b;
-        blk_key.stepj0b = regs.stepj0b;
+        LookupBlock();
 
-               // Current state
-        blk_key.curr.mod0.raw = regs.mod0.raw & Mod0::Mask();
-        blk_key.curr.mod1.raw = regs.mod1.raw & Mod1::Mask();
-        blk_key.curr.mod2.raw = regs.mod2.raw;
-        blk_key.curr.ar = regs.ar;
-        for (size_t i = 0; i < blk_key.curr.ar.size(); i++) {
-            blk_key.curr.ar[i].raw &= ArU::Mask();
-        }
-        blk_key.curr.arp = regs.arp;
-        for (size_t i = 0; i < blk_key.curr.arp.size(); i++) {
-            blk_key.curr.arp[i].raw &= ArpU::Mask();
-        }
-
-               // Shadow state.
-        blk_key.shadow.mod0.raw = regs.mod0b.raw & Mod0::Mask();
-        blk_key.shadow.mod1.raw = regs.mod1b.raw & Mod1::Mask();
-        blk_key.shadow.mod2 = regs.mod2b;
-        blk_key.shadow.ar = regs.arb;
-        for (size_t i = 0; i < blk_key.shadow.ar.size(); i++) {
-            blk_key.shadow.ar[i].raw &= ArU::Mask();
-        }
-        blk_key.shadow.arp = regs.arpb;
-        for (size_t i = 0; i < blk_key.shadow.arp.size(); i++) {
-            blk_key.shadow.arp[i].raw &= ArpU::Mask();
-        }
-
-        const size_t hash = Common::ComputeStructHash64(blk_key);
-        auto [it, new_block] = code_blocks.try_emplace(hash);
-        current_blk = &it->second;
-
-        if (new_block) {
-            // Note: They key may change during compilation, so this needs to be first.
-            auto& blk = it->second;
-            blk.entry_key = blk_key;
-            CompileBlock(blk);
-        }
-
-               // Check if we are idle, and skip ahead
+        // Check if we are idle, and skip ahead
         if (regs.idle) {
             u64 skipped = core_timing.Skip(cycles_remaining - 1);
             cycles_remaining -= skipped;
@@ -217,23 +205,41 @@ public:
             }
         }
 
-               // Check for interrupts.
+        // Check for interrupts.
         for (std::size_t i = 0; i < 3; ++i) {
-            if (interrupt_pending[i].exchange(false)) {
+            if (interrupt_pending[i]) {
                 regs.ip[i] = 1;
+                interrupt_pending[i] = false;
             }
         }
 
-        if (vinterrupt_pending.exchange(false)) {
+        if (vinterrupt_pending) {
             regs.ipv = 1;
+            vinterrupt_pending = false;
         }
 
-               // Return block function
+        // Return the block function to execute.
         return current_blk->func;
     }
 
     static void DoInterruptsAndRunDebugThunk(void* this_ptr) {
         reinterpret_cast<EmitX64*>(this_ptr)->DoInterruptsAndRunDebug();
+    }
+
+    FORCE_INLINE void LookupBlock() {
+        auto& vec = block_cache[regs.pc];
+        for (auto& [key, block] : vec) {
+            if (key == blk_key) {
+                current_blk = &block;
+                return;
+            }
+        }
+
+        auto& [key, blk] = vec.emplace_back();
+        key = blk_key;
+        current_blk = &blk;
+        CompileBlock(blk);
+        //printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
     }
 
     void DoInterruptsAndRunDebug() {
@@ -265,15 +271,9 @@ public:
             }
         }
 
-               // Count the cycles of the previous executed block.
+        // Count the cycles of the previous executed block.
         core_timing.Tick(current_blk->cycles);
         cycles_remaining -= current_blk->cycles;
-
-               // DEBUG: Run interpreter before running block. We will compare register
-               // state when the dispatcher is re-entered to ensure JIT was correct.
-               //debug_interp->Run(current_blk->cycles);
-               //ASSERT(cycles_remaining == debug_interp->total_cycles);
-               //CompareRegisterState();
     }
 
     void CompileBlock(Block& blk) {
@@ -288,6 +288,12 @@ public:
         c.mov(B[0], qword[REGS + offsetof(JitRegisters, b)]);
         c.mov(B[1], qword[REGS + offsetof(JitRegisters, b) + sizeof(u64)]);
         c.mov(FLAGS, word[REGS + offsetof(JitRegisters, flags)]);
+
+        call_stack = {};
+
+        //Disassembler::ArArpSettings settings;
+        //std::memcpy(&settings.ar, &blk_key.curr.ar, sizeof(settings.ar));
+        //std::memcpy(&settings.arp, &blk_key.curr.arp, sizeof(settings.arp));
 
         compiling = true;
         while (compiling) {
@@ -319,9 +325,16 @@ public:
             if (bkrep_end_locations.contains(regs.pc - 1)) {
                 EmitBkrepReturn(regs.pc);
             }
+
+            //const auto name = Disassembler::Do(opcode, expand_value, settings);
+            //printf("%s\n", name.c_str());
         }
 
-               // Flush block state
+        // Flush block state
+        EmitBlockExit();
+    }
+
+    void EmitBlockExit() {
         c.mov(qword[REGS + offsetof(JitRegisters, r)], R0_1_2_3);
         c.mov(qword[REGS + offsetof(JitRegisters, r) + sizeof(u16) * 4], R4_5_6_7);
         c.mov(qword[REGS + offsetof(JitRegisters, y)], FACTORS);
@@ -398,18 +411,20 @@ public:
     }
 
     void EmitPopPC() {
-        const Reg16 sp = bx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        const Reg64 sp = rbx;
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 pc = rcx;
         c.xor_(pc, pc);
         if (regs.cpc == 1) {
             NOT_IMPLEMENTED();
         } else {
-            LoadFromMemory(pc, sp);
+            EmitLoadFromMemory<true>(pc, sp);
+            c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
             c.add(sp, 1);
             c.shl(pc, 16);
-            LoadFromMemory(pc, sp);
-            c.add(sp, 1);
+            EmitLoadFromMemory<true>(pc, sp);
+            c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
+            c.add(sp, 2);
         }
         c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], pc.cvt32());
@@ -444,10 +459,10 @@ public:
 
     using instruction_return_type = void;
 
-    std::array<std::atomic<bool>, 3> interrupt_pending{{false, false, false}};
-    std::atomic<bool> vinterrupt_pending{false};
-    std::atomic<bool> vinterrupt_context_switch;
-    std::atomic<u32> vinterrupt_address;
+    std::array<bool, 3> interrupt_pending{};
+    bool vinterrupt_pending{false};
+    bool vinterrupt_context_switch;
+    u32 vinterrupt_address;
 
     void nop() {
         // literally nothing
@@ -561,6 +576,87 @@ public:
         return reinterpret_cast<MemoryInterface*>(mem_ptr)->DataRead(address);
     }
 
+    void EmitLoadFunctionCall(Reg64 out, Reg64 address) {
+        // TODO: Non MMIO reads can be performed inside the JIT.
+        // Push all registers because our JIT assumes everything is non volatile
+        c.push(rbp);
+        c.push(rbx);
+        c.push(rcx);
+        c.push(rdx);
+        c.push(rsi);
+        c.push(rdi);
+        c.push(r8);
+        c.push(r9);
+        c.push(r10);
+        c.push(r11);
+        c.push(r12);
+        c.push(r13);
+        c.push(r14);
+        c.push(r15);
+
+        c.mov(rbp, rsp);
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        c.sub(rsp, 64);
+        c.and_(rsp, ~0xF);
+
+        c.movzx(ABI_PARAM2, address.cvt16());
+        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
+        CallFarFunction(c, MemDataReadThunk);
+
+        // Undo anything we did
+        c.mov(rsp, rbp);
+        c.pop(r15);
+        c.pop(r14);
+        c.pop(r13);
+        c.pop(r12);
+        c.pop(r11);
+        c.pop(r10);
+        c.pop(r9);
+        c.pop(r8);
+        c.pop(rdi);
+        c.pop(rsi);
+        c.pop(rdx);
+        c.pop(rcx);
+        c.pop(rbx);
+        c.pop(rbp);
+        c.mov(out.cvt16(), ABI_RETURN.cvt16());
+    }
+
+    void EmitConvertAddress(Reg64 addr, Reg64 scratch) {
+        // NOTE: This assumes x_size[0] is always 0x1E!
+        c.mov(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, x_offset)]);
+        c.cmp(addr, 0x1E * MemoryInterfaceUnit::XYSizeResolution);
+        c.cmovg(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, y_offset)]);
+        c.cmp(word[REGS + offsetof(JitRegisters, page_mode)], 0);
+        c.cmove(scratch.cvt32(), dword[REGS + offsetof(JitRegisters, z_offset)]);
+        c.add(addr, scratch);
+    }
+
+    template <bool bypass_mmio = false>
+    void EmitLoadFromMemory(Reg64 out, Reg64 address) {
+        Xbyak::Label end_label, read_label;
+        const Reg64 scratch = rsi;
+        if constexpr (!bypass_mmio) {
+            c.movzx(scratch, word[REGS + offsetof(JitRegisters, mmio_base)]);
+            c.cmp(address, scratch);
+            c.jl(read_label);
+            c.add(scratch, MemoryInterfaceUnit::MMIOSize);
+            c.cmp(address, scratch);
+            c.jge(read_label);
+            EmitLoadFunctionCall(out, address);
+            c.jmp(end_label);
+            c.L(read_label);
+        }
+
+        EmitConvertAddress(address, scratch);
+        c.mov(scratch, reinterpret_cast<uintptr_t>(mem.shared_memory.raw.data()));
+        c.mov(out.cvt16(), word[scratch + address * 2]);
+
+        if constexpr (!bypass_mmio) {
+            c.L(end_label);
+        }
+    }
+
     void LoadFromMemory(Reg64 out, MemImm8 addr) {
         LoadFromMemory(out, addr.Unsigned16() + (blk_key.curr.mod1.page << 8));
     }
@@ -597,7 +693,7 @@ public:
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
         CallFarFunction(c, MemDataReadThunk);
 
-               // Undo anything we did
+        // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
@@ -840,7 +936,9 @@ public:
 
     void alm(Alm op, MemImm8 a, Ax b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a);
+        const Reg64 address = rcx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -848,7 +946,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -885,17 +983,19 @@ public:
 
     void alu(Alu op, MemImm16 a, Ax b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16());
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16());
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
     void alu(Alu op, MemR7Imm16 a, Ax b) {
         const Reg64 address = rax;
         const Reg64 value = rbx;
-
         RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
         c.add(address, a.Unsigned16());
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -927,10 +1027,12 @@ public:
         }
     }
     void alu(Alu op, MemR7Imm7s a, Ax b) {
-        RegToBus16(RegName::r7, rax);
-        c.add(eax, a.Signed16());
+        const Reg64 address = rax;
+        RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
+        c.add(address.cvt32(), a.Signed16());
         const Reg64 value = rbx;
-        LoadFromMemory(value, rax);
+        EmitLoadFromMemory(value, address);
         ExtendOperandForAlm(op.GetName(), value);
         AlmGeneric(op.GetName(), value, b);
     }
@@ -1152,7 +1254,9 @@ public:
 
     void alb(Alb op, Imm16 a, MemImm8 b) {
         const Reg64 bv = rax;
-        LoadFromMemory(bv, b.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, b.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(bv, address);
         const Reg64 result = rbx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
         if (IsAlbModifying(op)) {
@@ -1163,7 +1267,7 @@ public:
         const Reg64 address = rbx;
         RnAddressAndModify(b.Index(), bs.GetName(), address);
         const Reg64 bv = rax;
-        LoadFromMemory(bv, address);
+        EmitLoadFromMemory(bv, address);
         const Reg64 result = rcx;
         GenericAlb(op, a.Unsigned16(), bv.cvt16(), result.cvt16());
         if (IsAlbModifying(op)) {
@@ -1642,6 +1746,7 @@ public:
 
     static void PrintValue(u64 value, const char* fmt) {
         printf(fmt, value);
+        std::fflush(stdout);
     }
 
     template <typename T>
@@ -2054,9 +2159,11 @@ public:
     void br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         ConditionPass(cond, [&] {
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], Address32(addr_low, addr_high));
+            regs.pc = Address32(addr_low, addr_high);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
     }
 
     void brr(RelAddr7 addr, Cond cond) {
@@ -2067,9 +2174,12 @@ public:
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
             if (addr.Relative32() == 0xFFFFFFFF) {
                 c.mov(dword[REGS + offsetof(JitRegisters, idle)], true);
+                compiling = false; // Always end compilation for idle loops.
+            } else {
+                // For static jump we can continue compiling.
+                compiling = cond.GetName() == CondValue::True;
             }
         });
-        compiling = false;
     }
 
     void break_() {
@@ -2077,12 +2187,18 @@ public:
     }
 
     void call(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        const u32 ret_pc = regs.pc;
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], ret_pc);
         ConditionPass(cond, [&] {
             EmitPushPC();
-            c.mov(dword[REGS + offsetof(JitRegisters, pc)], Address32(addr_low, addr_high));
+            regs.pc = Address32(addr_low, addr_high);
+            c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
+        if (compiling) {
+            call_stack.push(ret_pc);
+        }
     }
     void calla(Axl a) {
         NOT_IMPLEMENTED();
@@ -2096,13 +2212,18 @@ public:
         compiling = false;
     }
     void callr(RelAddr7 addr, Cond cond) {
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
+        const u32 ret_pc = regs.pc;
+        c.mov(dword[REGS + offsetof(JitRegisters, pc)], ret_pc);
         ConditionPass(cond, [&] {
             EmitPushPC();
             regs.pc += addr.Relative32();
             c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
         });
-        compiling = false;
+        // For static jump we can continue compiling.
+        compiling = cond.GetName() == CondValue::True;
+        if (compiling) {
+            call_stack.push(ret_pc);
+        }
     }
 
     void cntx_s() {
@@ -2158,6 +2279,13 @@ public:
         ConditionPass(cond, [&] {
             EmitPopPC();
         });
+        // If the last call instruction had a static target and this instruction
+        // always returns, we don't have to stop compiling.
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retd() {
@@ -2169,6 +2297,11 @@ public:
             EmitPopPC();
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
         });
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retic(Cond cond) {
@@ -2178,6 +2311,11 @@ public:
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
             cntx_r();
         });
+        if (cond.GetName() == CondValue::True && !call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
     void retid() {
@@ -2189,6 +2327,11 @@ public:
     void rets(Imm8 a) {
         EmitPopPC();
         c.add(word[REGS + offsetof(JitRegisters, sp)], a.Unsigned16());
+        if (!call_stack.empty()) {
+            regs.pc = call_stack.top();
+            call_stack.pop();
+            return;
+        }
         compiling = false;
     }
 
@@ -2404,21 +2547,19 @@ public:
 
     void pop(Register a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(a.GetName(), value);
     }
     void pop(Abe a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
         const Reg32 tmp = eax; // Register used just for truncating the accumulator register to 32 bits
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.movsx(value.cvt32(), value.cvt8());
         c.shl(value, 32);
         // Zero-extend bottom 32 bits of accumulator to tmp.cvt64() and merge it into value
@@ -2428,11 +2569,10 @@ public:
     }
     void pop(ArArpSttMod a) {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(a.GetName(), value);
     }
     void pop(Bx a) {
@@ -2455,51 +2595,46 @@ public:
     }
     void pop_r6() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         RegFromBus16(RegName::r6, value);
     }
     void pop_repc() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.mov(word[REGS + offsetof(JitRegisters, repc)], value.cvt16());
     }
     void pop_x0() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
     }
     void pop_x1() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 48);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 16);
     }
     void pop_y1() {
         const Reg64 sp = rbx;
-        c.mov(sp, word[REGS + offsetof(JitRegisters, sp)]);
+        c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        LoadFromMemory(value, sp);
-        c.add(sp, 1);
-        c.mov(word[REGS + offsetof(JitRegisters, sp)], sp.cvt16());
+        EmitLoadFromMemory<true>(value, sp);
+        c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.rorx(FACTORS, FACTORS, 16);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 48);
@@ -2519,24 +2654,18 @@ public:
     }
 
     void rep(Imm8 a) {
-        /*u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
+        u16 opcode = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         auto& decoder = decoders[opcode];
         u16 expand_value = 0;
         if (decoder.NeedExpansion()) {
             expand_value = mem.ProgramRead((regs.pc++) | (regs.prpage << 18));
         }
 
-         for (int i = 0; i <= a.Unsigned16(); i++) {
-             decoder.call(*this, opcode, expand_value);
-             current_blk->cycles++;
-             ASSERT(compiling); // Ensure the instruction doesn't break the block
-         }*/
-
-        c.mov(word[REGS + offsetof(JitRegisters, rep)], true);
-        c.mov(word[REGS + offsetof(JitRegisters, repc)], a.Unsigned16());
-        c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        compiling = false;
-        rep_end_locations.insert(regs.pc);
+        for (int i = 0; i <= a.Unsigned16(); i++) {
+            decoder.call(*this, opcode, expand_value);
+            current_blk->cycles++;
+            ASSERT(compiling); // Ensure the instruction doesn't break the block
+        }
     }
     void rep(Register a) {
         const Reg64 value = rax;
@@ -2552,8 +2681,6 @@ public:
     }
 
     void shfc(Ab a, Ab b, Cond cond) {
-        //NOT_IMPLEMENTED();
-        //return;
         ConditionPass(cond, [&] {
             const Reg64 value = rax;
             GetAcc(value, a.GetName());
@@ -2577,7 +2704,9 @@ public:
     }
     void tstb(MemImm8 a, Imm4 b) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
@@ -2588,7 +2717,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.xor_(eax, eax);
         c.and_(FLAGS, ~decltype(Flags::fz)::mask);
         c.bt(value, b.Unsigned16());
@@ -2672,7 +2801,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(x.Index(), xs.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), value.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
@@ -2691,9 +2820,9 @@ public:
         const Reg64 address_x = rbx;
         RnAddressAndModify(y.Index(), ys.GetName(), address_y);
         RnAddressAndModify(x.Index(), xs.GetName(), address_x);
-        LoadFromMemory(FACTORS, address_y);
+        EmitLoadFromMemory(FACTORS, address_y);
         c.rorx(FACTORS, FACTORS, 32);
-        LoadFromMemory(FACTORS, address_x);
+        EmitLoadFromMemory(FACTORS, address_x);
         c.rorx(FACTORS, FACTORS, 32);
         MulGeneric(op.GetName(), a);
     }
@@ -2702,7 +2831,9 @@ public:
     }
     void mul_y0(Mul2 op, MemImm8 x, Ax a) {
         const Reg64 x0 = rax;
-        LoadFromMemory(x0, x);
+        const Reg64 address = rbx;
+        c.mov(address, x.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(x0, address);
         c.rorx(FACTORS, FACTORS, 32);
         c.mov(FACTORS.cvt16(), x0.cvt16());
         c.rorx(FACTORS, FACTORS, 32);
@@ -2936,17 +3067,23 @@ public:
 
     void mov(MemImm16 a, Ax b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16());
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16());
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ab b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemImm8 a, Ablh b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_eu(MemImm8 a, Axh b) {
@@ -2954,12 +3091,16 @@ public:
     }
     void mov(MemImm8 a, RnOld b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_sv(MemImm8 a) {
         const Reg64 value = rbx;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rax;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         c.mov(word[REGS + offsetof(JitRegisters, sv)], value.cvt16());
     }
     void mov_dvm_to(Ab b) {
@@ -2998,30 +3139,32 @@ public:
         const Reg64 value = rax;
         const Reg64 address = rbx;
         RegToBus16(RegName::r7, address);
+        c.movzx(address, address.cvt16());
         c.add(address, a.Unsigned16());
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(MemR7Imm7s a, Ax b) {
         const Reg64 address = rax;
         RegToBus16(RegName::r7, address);
-        c.add(address, a.Signed16());
+        c.movzx(address, address.cvt16());
+        c.add(address.cvt32(), ::SignExtend<16, u32>(a.Signed16()));
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Bx b) {
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov(Rn a, StepZIDS as, Register b) {
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rbx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         RegFromBus16(b.GetName(), value);
     }
     void mov_memsp_to(Register b) {
@@ -3284,9 +3427,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
         const Reg64 value = rcx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.shl(value, 16);
-        LoadFromMemory(value, address2);
+        EmitLoadFromMemory(value, address2);
         ProductFromBus32(b, value.cvt32());
     }
     void mova(Ab a, ArRn2 b, ArStep2 bs) {
@@ -3312,9 +3455,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(as));
         const Reg64 value = rcx;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         c.ror(value.cvt32(), 16);
-        LoadFromMemory(value, address2);
+        EmitLoadFromMemory(value, address2);
         c.movsxd(value, value.cvt32());
         SatAndSetAccAndFlag(b.GetName(), value);
     }
@@ -3395,7 +3538,7 @@ public:
         GetAndSatAccNoFlag(value, a.GetName());
         c.shr(value, 16);
         StoreToMemory(i, value);
-        LoadFromMemory(value, j);
+        EmitLoadFromMemory(value, j);
         c.shl(value, 16);
         SignExtend(value, 32);
         SetAcc(a.GetName(), value);
@@ -3406,7 +3549,9 @@ public:
 
     void movs(MemImm8 a, Ab b) {
         const Reg64 value = rax;
-        LoadFromMemory(value, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        const Reg64 address = rbx;
+        c.mov(address, a.Unsigned16() + (blk_key.curr.mod1.page << 8));
+        EmitLoadFromMemory(value, address);
         SignExtend(value, 16);
         const Reg16 sv = cx;
         c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
@@ -3416,7 +3561,7 @@ public:
         const Reg64 address = rax;
         RnAddressAndModify(a.Index(), as.GetName(), address);
         const Reg64 value = rax;
-        LoadFromMemory(value, address);
+        EmitLoadFromMemory(value, address);
         SignExtend(value, 16);
         const Reg16 sv = cx;
         c.mov(sv, word[REGS + offsetof(JitRegisters, sv)]);
@@ -3783,18 +3928,18 @@ public:
         c.mov(x2, x);
         OffsetAddress(ui, x2.cvt16(), oi, dmodi);
         const Reg64 factors = rcx;
-        LoadFromMemory(factors, x2);
+        EmitLoadFromMemory<true>(factors, x2);
         c.shl(factors, 16);
-        LoadFromMemory(factors, x);
+        EmitLoadFromMemory<true>(factors, x);
         c.shl(factors, 16);
         const Reg64 y = x;
         RnAddressAndModify(uj, sj, y, dmodj);
         const Reg64 y2 = x2;
         c.mov(y2, y);
         OffsetAddress(uj, y2.cvt16(), oj, dmodj);
-        LoadFromMemory(factors, y2);
+        EmitLoadFromMemory<true>(factors, y2);
         c.shl(factors, 16);
-        LoadFromMemory(factors, y);
+        EmitLoadFromMemory<true>(factors, y);
         c.mov(FACTORS, factors);
         DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
         DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
@@ -3823,9 +3968,9 @@ public:
         c.mov(address2, address);
         OffsetAddress(unit, address2.cvt16(), GetArOffset(xs));
         c.rorx(FACTORS, FACTORS, 32);
-        LoadFromMemory(FACTORS, address);
+        EmitLoadFromMemory<true>(FACTORS, address);
         c.rorx(FACTORS, FACTORS, 16);
-        LoadFromMemory(FACTORS, address2);
+        EmitLoadFromMemory<true>(FACTORS, address2);
         c.rorx(FACTORS, FACTORS, 16);
         DoMultiplication(0, eax, ebx, x0_sign, y0_sign);
         DoMultiplication(1, eax, ebx, x1_sign, y1_sign);
@@ -5198,80 +5343,6 @@ private:
                                                         {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
                                                         };
         return map.at(in);
-    }
-
-    bool CompareRegisterState() {
-        using Frame = JitRegisters::BlockRepeatFrame;
-        bool result = true;
-        auto& raw = mem.GetMemory().raw;
-        if (!(std::memcmp(raw.data(), debug_interp->mem.GetMemory().raw.data(), raw.size()) == 0)) {
-            printf("Memory does not match!\n");
-            for (size_t i = 0; i < raw.size(); i += 2) {
-                const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[i];
-                const u16 jit = *(u16*)&raw[i];
-                if (interp != jit && !(interp == (iregs->pc & 0xFFFF) && jit == (regs.pc & 0xFFFF))) {
-                    printf("Word 0x%lx mismatch (interp: 0x%x, jit: 0x%x)\n", i >> 1, interp, jit);
-                    result = false;
-                }
-            }
-            std::fflush(stdout);
-        }
-        if (!(regs.pc == iregs->pc && regs.r == iregs->r && regs.cpc == iregs->cpc && regs.prpage == iregs->prpage && regs.repc == iregs->repc && regs.repcs == iregs->repcs)) {
-            std::fflush(stdout);
-            printf("Failed part 0 of checks\n");
-            result = false;
-        }
-        if (!(regs.im == iregs->im && regs.ou == iregs->ou && regs.nimc == iregs->nimc)) {
-            printf("Failed part 1 of checks\n");
-            result = false;
-        }
-        if (!(regs.crep == iregs->crep && regs.a == iregs->a && regs.b == iregs->b)) {
-            printf("Failed part 2 of checks\n");
-            result = false;
-        }
-        if (!(regs.ccnta == iregs->ccnta && regs.mod0.sat == iregs->sat && regs.mod0.sata == iregs->sata && regs.mod0.s == iregs->s && regs.sv == iregs->sv)) {
-            printf("Failed part 3 of checks\n");
-            result = false;
-        }
-        if (!(regs.flags.fz == iregs->fz && regs.flags.fm == iregs->fm && regs.flags.fn == iregs->fn && regs.flags.fv == iregs->fv && regs.flags.fe == iregs->fe)) {
-            const u16 interp = *(u16*)&debug_interp->mem.GetMemory().raw[0x78d6 * 2];
-            const u16 jit = *(u16*)&raw[0x78d6 * 2];
-            printf("Interp 0x%x JIT 0x%x\n", interp, jit);
-            std::fflush(stdout);
-            printf("Failed part 4 of checks\n");
-            result = false;
-        }
-        if (!(regs.flags.fc0 == iregs->fc0 && regs.flags.fc1 == iregs->fc1 && regs.flags.flm == iregs->flm && regs.flags.fvl == iregs->fvl && regs.flags.fr == iregs->fr)) {
-            std::fflush(stdout);
-            printf("Failed part 5 of checks\n");
-            result = false;
-        }
-        if (!(regs.vtr0 == iregs->vtr0 && regs.vtr1 == iregs->vtr1 && regs.x == iregs->x && regs.y == iregs->y && regs.mod0.hwm == iregs->hwm && regs.p == iregs->p)) {
-            printf("Failed part 6 of checks\n");
-            result = false;
-        }
-        if (!(regs.pe == iregs->pe && regs.mod0.ps0 == iregs->ps[0] && regs.mod0.ps1 == iregs->ps[1] && regs.p0h_cbs == iregs->p0h_cbs && regs.mixp == iregs->mixp)) {
-            printf("Failed part 7 of checks\n");
-            result = false;
-        }
-        if (!(regs.sp == iregs->sp && regs.mod1.page == iregs->page && regs.pcmhi == iregs->pcmhi && regs.cfgi.step == iregs->stepi && regs.cfgj.step == iregs->stepj)) {
-            printf("Failed part 8 of checks\n");
-            result = false;
-        }
-        if (!(regs.cfgi.mod == iregs->modi && regs.cfgj.mod == iregs->modj && regs.stepi0 == iregs->stepi0 && regs.stepj0 == iregs->stepj0 && regs.mod1.stp16 == iregs->stp16)) {
-            printf("Failed part 9 of checks\n");
-            result = false;
-        }
-        if (!(regs.mod1.cmd == iregs->cmd && regs.mod1.epi == iregs->epi && regs.mod1.epj == iregs->epj)) {
-            printf("Failed part 10 of checks\n");
-            result = false;
-        }
-        if (!(regs.lp == iregs->lp && regs.bcn == iregs->bcn && std::memcmp(&regs.bkrep_stack, &iregs->bkrep_stack, sizeof(Frame)) == 0)) {
-            printf("Failed part 11 of checks\n");
-            result = false;
-        }
-        return result;
-
     }
 };
 
