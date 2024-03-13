@@ -588,10 +588,6 @@ public:
         NOT_IMPLEMENTED();
     }
 
-    static u16 MemDataReadThunk(void* mem_ptr, u16 address) {
-        return reinterpret_cast<MemoryInterface*>(mem_ptr)->DataRead(address);
-    }
-
     void EmitLoadFunctionCall(Reg64 out, Reg64 address) {
         // TODO: Non MMIO reads can be performed inside the JIT.
         // Push all registers because our JIT assumes everything is non volatile
@@ -616,8 +612,8 @@ public:
         c.and_(rsp, ~0xF);
 
         c.movzx(ABI_PARAM2, address.cvt16());
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        CallFarFunction(c, MemDataReadThunk);
+        c.xor_(ABI_PARAM3.cvt32(), ABI_PARAM3.cvt32()); // bypass_mmio = false
+        CallMemberFunction(&MemoryInterface::DataRead, &mem);
 
         // Undo anything we did
         c.mov(rsp, rbp);
@@ -706,8 +702,8 @@ public:
         } else {
             c.mov(ABI_PARAM2, addr & 0xFFFF);
         }
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        CallFarFunction(c, MemDataReadThunk);
+        c.xor_(ABI_PARAM3.cvt32(), ABI_PARAM3.cvt32()); // bypass_mmio = false
+        CallMemberFunction(&MemoryInterface::DataRead, &mem);
 
         // Undo anything we did
         c.mov(rsp, rbp);
@@ -757,10 +753,10 @@ public:
         } else {
             c.mov(ABI_PARAM2, addr & 0xFFFF);
         }
-        c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        CallFarFunction(c, MemDataReadThunk);
+        c.xor_(ABI_PARAM3.cvt32(), ABI_PARAM3.cvt32()); // bypass_mmio = false
+        CallMemberFunction(&MemoryInterface::DataRead, &mem);
 
-               // Undo anything we did
+        // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
@@ -2995,10 +2991,6 @@ public:
         c.rorx(FACTORS, FACTORS, 48);
     }
 
-    static void MemDataWriteThunk(void* mem_ptr, u16 address, u16 data) {
-        reinterpret_cast<MemoryInterface*>(mem_ptr)->DataWrite(address, data);
-    }
-
     void StoreToMemory(MemImm8 addr, Reg64 value) {
         StoreToMemory(addr.Unsigned16() + (blk_key.curr.mod1.page << 8), value);
     }
@@ -3034,9 +3026,10 @@ public:
         }
         c.mov(ABI_PARAM3, value);
         c.mov(ABI_PARAM1, reinterpret_cast<uintptr_t>(&mem));
-        CallFarFunction(c, MemDataWriteThunk);
+        c.xor_(ABI_PARAM4.cvt32(), ABI_PARAM4.cvt32()); // bypass_mmio = false
+        CallMemberFunction(&MemoryInterface::DataWrite, &mem);
 
-               // Undo anything we did
+        // Undo anything we did
         c.mov(rsp, rbp);
         c.pop(r15);
         c.pop(r14);
