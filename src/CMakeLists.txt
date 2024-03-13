@@ -12,6 +12,7 @@ add_library(teakra
     btdmp.cpp
     btdmp.h
     common_types.h
+    core_timing.h
     crash.h
     decoder.h
     disassembler.cpp
@@ -39,17 +40,16 @@ add_library(teakra
     test.h
     test_generator.cpp
     test_generator.h
-    jit.h jit.cpp
     xbyak_abi.h
-    ir/basic_block.cpp
-    ir/basic_block.h
-    ir/ir_emitter.cpp
-    ir/ir_emitter.h
-    ir/microinstruction.cpp
-    ir/microinstruction.h
-    ir/value.cpp
-    ir/value.h
-    ir/opcode.h
+    #ir/basic_block.cpp
+    #ir/basic_block.h
+    #ir/ir_emitter.cpp
+    #ir/ir_emitter.h
+    #ir/microinstruction.cpp
+    #ir/microinstruction.h
+    #ir/value.cpp
+    #ir/value.h
+    #ir/opcode.h
     jit_no_ir.cpp
     jit_no_ir.h
     jit_regs.h
@@ -60,7 +60,7 @@ add_library(teakra
 
 create_target_directory_groups(teakra)
 
-target_link_libraries(teakra PRIVATE Threads::Threads mcl xbyak::xbyak)
+target_link_libraries(teakra PRIVATE Threads::Threads boost tsl::robin_map xbyak::xbyak)
 target_include_directories(teakra
                            PUBLIC ../include
                            PRIVATE .)

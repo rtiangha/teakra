@@ -1,13 +1,10 @@
-#include <string>
+#include <limits>
 #include "btdmp.h"
 #include "crash.h"
 
 namespace Teakra {
 
-Btdmp::Btdmp(CoreTiming& core_timing) {
-    core_timing.RegisterCallbacks(this);
-}
-
+Btdmp::Btdmp() = default;
 Btdmp::~Btdmp() = default;
 
 void Btdmp::Reset() {
@@ -21,35 +18,38 @@ void Btdmp::Reset() {
 }
 
 void Btdmp::Tick(u64 ticks) {
-    if (transmit_enable) {
-        transmit_timer += ticks;
-        if (transmit_timer >= transmit_period) {
-            transmit_timer = 0;
-            std::array<std::int16_t, 2> sample;
-            for (int i = 0; i < 2; ++i) {
-                if (transmit_queue.empty()) {
-                    std::printf("BTDMP: transmit buffer underrun\n");
-                    sample[i] = 0;
-                } else {
-                    sample[i] = static_cast<s16>(transmit_queue.front());
-                    transmit_queue.pop();
-                    transmit_empty = transmit_queue.empty();
-                    transmit_full = false;
-                    if (transmit_empty) {
-                        interrupt_handler();
-                    }
+    if (!transmit_enable) {
+        return;
+    }
+
+    transmit_timer += ticks;
+    while (transmit_timer >= transmit_period) {
+        transmit_timer -= transmit_period;
+
+        std::array<std::int16_t, 2> sample;
+        for (int i = 0; i < 2; ++i) {
+            if (transmit_queue.empty()) {
+                std::printf("BTDMP: transmit buffer underrun\n");
+                sample[i] = 0;
+            } else {
+                sample[i] = static_cast<s16>(transmit_queue.front());
+                transmit_queue.pop();
+                transmit_empty = transmit_queue.empty();
+                transmit_full = false;
+                if (transmit_empty) {
+                    interrupt_handler();
                 }
             }
-            if (audio_callback) {
-                audio_callback(sample);
-            }
+        }
+        if (audio_callback) {
+            audio_callback(sample);
         }
     }
 }
 
 u64 Btdmp::GetMaxSkip() const {
     if (!transmit_enable || transmit_queue.empty()) {
-        return Infinity;
+        return std::numeric_limits<u64>::max();
     }
 
     u64 ticks = 0;

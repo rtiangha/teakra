@@ -1,17 +1,17 @@
 #pragma once
+
 #include <array>
 #include <cstdio>
 #include <functional>
 #include <utility>
 #include <queue>
 #include "common_types.h"
-#include "core_timing.h"
 
 namespace Teakra {
 
-class Btdmp : public CoreTiming::Callbacks {
+class Btdmp {
 public:
-    Btdmp(CoreTiming& core_timing);
+    Btdmp();
     ~Btdmp();
 
     void Reset();
@@ -68,9 +68,9 @@ public:
         return 0;
     }
 
-    void Tick(u64 ticks) override;
-    u64 GetMaxSkip() const override;
-    void Skip(u64 ticks) override;
+    void Tick(u64 ticks);
+    u64 GetMaxSkip() const;
+    void Skip(u64 ticks);
 
     void SetAudioCallback(std::function<void(std::array<std::int16_t, 2>)> callback) {
         audio_callback = std::move(callback);
@@ -83,10 +83,10 @@ public:
 private:
     // TODO: figure out the relation between clock_config and period.
     // Default to period = 4096 for now which every game uses
-    u16 transmit_clock_config = 0;
-    u16 transmit_period = 4096;
-    u16 transmit_timer = 0;
-    u16 transmit_enable = 0;
+    u32 transmit_clock_config = 0;
+    u32 transmit_period = 4096;
+    u32 transmit_timer = 0;
+    u32 transmit_enable = 0;
     bool transmit_empty = true;
     bool transmit_full = false;
     std::queue<u16> transmit_queue;

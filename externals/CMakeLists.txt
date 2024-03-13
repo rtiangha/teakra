@@ -4,9 +4,6 @@ if (TEAKRA_BUILD_UNIT_TESTS)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/catch>)
 endif()
 
-set(MCL_INSTALL OFF)
-add_subdirectory(mcl)
-
 if (NOT TARGET xbyak::xbyak)
     add_subdirectory(xbyak)
 endif()

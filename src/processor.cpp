@@ -18,6 +18,7 @@ struct Processor::Impl {
 
 Processor::Processor(CoreTiming& core_timing, MemoryInterface& memory_interface, bool use_jit)
     : impl(new Impl(core_timing, memory_interface, use_jit)) {}
+
 Processor::~Processor() = default;
 
 void Processor::Reset() {
@@ -28,11 +29,11 @@ void Processor::Reset() {
     }
 }
 
-void Processor::Run(unsigned cycles, Interpreter* debug_interp) {
+u32 Processor::Run(unsigned cycles, Interpreter* debug_interp) {
     if (impl->use_jit) {
-        impl->jit.Run(cycles, debug_interp);
+        return impl->jit.Run(cycles);
     } else {
-        impl->interpreter.Run(cycles);
+        return impl->interpreter.Run(cycles);
     }
 }
 
@@ -43,6 +44,7 @@ void Processor::SignalInterrupt(u32 i) {
         impl->interpreter.SignalInterrupt(i);
     }
 }
+
 void Processor::SignalVectoredInterrupt(u32 address, bool context_switch) {
     if (impl->use_jit) {
         impl->jit.SignalVectoredInterrupt(address, context_switch);

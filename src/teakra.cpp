@@ -1,6 +1,4 @@
 #include <array>
-#include <atomic>
-#include <cassert>
 #include "ahbm.h"
 #include "apbp.h"
 #include "btdmp.h"
@@ -17,21 +15,20 @@
 namespace Teakra {
 
 struct Teakra::Impl {
-    CoreTiming core_timing;
+    std::array<Timer, 2> timer{};
+    std::array<Btdmp, 2> btdmp{};
+    CoreTiming core_timing{timer, btdmp};
     SharedMemory shared_memory;
     MemoryInterfaceUnit miu;
     ICU icu;
     Apbp apbp_from_cpu, apbp_from_dsp;
-    std::array<Timer, 2> timer{{{core_timing}, {core_timing}}};
     Ahbm ahbm;
     Dma dma{shared_memory, ahbm};
-    std::array<Btdmp, 2> btdmp{{{core_timing}, {core_timing}}};
     MMIORegion mmio{miu, icu, apbp_from_cpu, apbp_from_dsp, timer, dma, ahbm, btdmp};
-    MemoryInterface memory_interface{shared_memory, miu};
+    MemoryInterface memory_interface{shared_memory, miu, mmio};
     Processor processor;
 
     Impl(bool use_jit) : processor(core_timing, memory_interface, use_jit) {
-        memory_interface.SetMMIO(mmio);
         using namespace std::placeholders;
         icu.SetInterruptHandler(std::bind(&Processor::SignalInterrupt, &processor, _1),
                                 std::bind(&Processor::SignalVectoredInterrupt, &processor, _1, _2));
@@ -65,12 +62,13 @@ struct Teakra::Impl {
     }
 };
 
-Teakra::Teakra() : impl(new Impl(true)), impl_interp(new Impl(false)) {}
+Teakra::Teakra(bool use_jit) : impl_jit(new Impl(true)), impl_interp(new Impl(false)),
+      impl(use_jit ? impl_jit.get() : impl_interp.get()), use_jit(use_jit) {}
+
 Teakra::~Teakra() = default;
 
 void Teakra::Reset() {
     impl->Reset();
-    impl_interp->Reset();
 }
 
 Processor& Teakra::GetProcessor() {
@@ -81,75 +79,55 @@ std::array<std::uint8_t, 0x80000>& Teakra::GetDspMemory() {
     return impl->shared_memory.raw;
 }
 
-std::array<std::uint8_t, 0x80000>& Teakra::GetInterpDspMemory() {
-    return impl_interp->shared_memory.raw;
-}
-
 const std::array<std::uint8_t, 0x80000>& Teakra::GetDspMemory() const {
     return impl->shared_memory.raw;
 }
 
-void Teakra::Run(unsigned cycle) {
-    impl->processor.Run(cycle, &impl_interp->processor.Interp());
+u32 Teakra::Run(unsigned cycle) {
+    return impl->processor.Run(cycle, &impl_interp->processor.Interp());
 }
 
 bool Teakra::SendDataIsEmpty(std::uint8_t index) const {
-    impl_interp->apbp_from_cpu.IsDataReady(index);
     return !impl->apbp_from_cpu.IsDataReady(index);
 }
 void Teakra::SendData(std::uint8_t index, std::uint16_t value) {
-    impl_interp->apbp_from_cpu.SendData(index, value);
     impl->apbp_from_cpu.SendData(index, value);
 }
 bool Teakra::RecvDataIsReady(std::uint8_t index) const {
-    impl_interp->apbp_from_dsp.IsDataReady(index);
     return impl->apbp_from_dsp.IsDataReady(index);
 }
 std::uint16_t Teakra::RecvData(std::uint8_t index) {
-    [[maybe_unused]] const u16 i = impl_interp->apbp_from_dsp.RecvData(index);
-    [[maybe_unused]] const u16 j = impl->apbp_from_dsp.RecvData(index);
-    //printf("RecvData = %d\n", j);
-    return j;
+    return impl->apbp_from_dsp.RecvData(index);
 }
 std::uint16_t Teakra::PeekRecvData(std::uint8_t index) {
     return impl->apbp_from_dsp.PeekData(index);
 }
 void Teakra::SetRecvDataHandler(std::uint8_t index, std::function<void()> handler) {
-    impl_interp->apbp_from_dsp.SetDataHandler(index, handler);
     impl->apbp_from_dsp.SetDataHandler(index, handler);
 }
 
 void Teakra::SetSemaphore(std::uint16_t value) {
-    impl_interp->apbp_from_cpu.SetSemaphore(value);
     impl->apbp_from_cpu.SetSemaphore(value);
 }
 void Teakra::SetSemaphoreHandler(std::function<void()> handler) {
-    impl_interp->apbp_from_dsp.SetSemaphoreHandler(handler);
     impl->apbp_from_dsp.SetSemaphoreHandler(handler);
 }
 std::uint16_t Teakra::GetSemaphore() const {
-    impl_interp->apbp_from_dsp.GetSemaphore();
     return impl->apbp_from_dsp.GetSemaphore();
 }
 void Teakra::ClearSemaphore(std::uint16_t value) {
-    impl_interp->apbp_from_dsp.ClearSemaphore(value);
     impl->apbp_from_dsp.ClearSemaphore(value);
 }
 void Teakra::MaskSemaphore(std::uint16_t value) {
-    impl_interp->apbp_from_dsp.MaskSemaphore(value);
     impl->apbp_from_dsp.MaskSemaphore(value);
 }
 void Teakra::SetAHBMCallback(const AHBMCallback& callback) {
-    impl_interp->ahbm.SetExternalMemoryCallback(callback.read8, callback.write8,
-                                                callback.read16, callback.write16,
-                                                callback.read32, callback.write32);
     impl->ahbm.SetExternalMemoryCallback(callback.read8, callback.write8,
         callback.read16, callback.write16,
         callback.read32, callback.write32);
 }
 
 std::uint16_t Teakra::AHBMGetUnitSize(std::uint16_t i) const {
-    impl_interp->ahbm.GetUnitSize(i);
     return impl->ahbm.GetUnitSize(i);
 }
 std::uint16_t Teakra::AHBMGetDirection(std::uint16_t i) const {
@@ -157,12 +135,10 @@ std::uint16_t Teakra::AHBMGetDirection(std::uint16_t i) const {
     return impl->ahbm.GetDirection(i);
 }
 std::uint16_t Teakra::AHBMGetDmaChannel(std::uint16_t i) const {
-    impl_interp->ahbm.GetDmaChannel(i);
     return impl->ahbm.GetDmaChannel(i);
 }
 
 std::uint16_t Teakra::AHBMRead16(std::uint32_t addr) {
-    impl_interp->ahbm.Read16(0, addr);
     return impl->ahbm.Read16(0, addr);
 }
 void Teakra::AHBMWrite16(std::uint32_t addr, std::uint16_t value) {
@@ -176,7 +152,6 @@ void Teakra::AHBMWrite32(std::uint32_t addr, std::uint32_t value) {
 }
 
 void Teakra::SetAudioCallback(std::function<void(std::array<s16, 2>)> callback) {
-    impl_interp->btdmp[0].SetAudioCallback(callback);
     impl->btdmp[0].SetAudioCallback(callback);
 }
 
@@ -212,6 +187,7 @@ std::uint16_t Teakra::DMAChan0GetSrcHigh() {
     impl->dma.ActivateChannel(active_bak);
     return ret;
 }
+
 std::uint16_t Teakra::DMAChan0GetDstHigh() {
     u16 active_bak = impl->dma.GetActiveChannel();
     impl->dma.ActivateChannel(0);

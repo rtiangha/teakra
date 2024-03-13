@@ -12,6 +12,13 @@ using s16 = std::int16_t;
 using s32 = std::int32_t;
 using s64 = std::int64_t;
 
+// Inlining
+#ifdef _MSC_VER
+#define FORCE_INLINE __forceinline
+#else
+#define FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
 template <typename T>
 constexpr unsigned BitSize() {
     return sizeof(T) * 8; // yeah I know I shouldn't use 8 here.

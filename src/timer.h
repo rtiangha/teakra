@@ -3,14 +3,11 @@
 #include <functional>
 #include <utility>
 #include "common_types.h"
-#include "core_timing.h"
 
 namespace Teakra {
 
-class Timer : public CoreTiming::Callbacks {
+class Timer {
 public:
-    Timer(CoreTiming& core_timing);
-
     enum class CountMode : u16 {
         Single = 0,
         AutoRestart = 1,
@@ -21,10 +18,11 @@ public:
     void Reset();
 
     void Restart();
-    void Tick(u64 ticks) override;
     void TickEvent();
-    u64 GetMaxSkip() const override;
-    void Skip(u64 ticks) override;
+
+    void Tick(u64 ticks);
+    u64 GetMaxSkip() const;
+    void Skip(u64 ticks);
 
     u16 update_mmio = 0;
     u16 pause = 0;
