@@ -21,6 +21,26 @@
 #include "shared_memory.h"
 #include "xbyak_abi.h"
 
+#ifdef _WIN32
+#ifndef _WIN64
+#define ARCHITECTURE_32BIT
+#else
+#define ARCHITECTURE_64BIT
+#endif
+#else
+#ifdef __arm__
+#ifndef __AARCH64__
+#define ARCHITECTURE_32BIT
+#else
+#define ARCHITECTURE_64BIT
+#endif
+#else
+#ifdef __x86_64__
+#define ARCHITECTURE_64BIT
+#endif
+#endif
+#endif
+
 #ifdef WIN32
 static constexpr bool IsWindows() {
     return true;
@@ -256,10 +276,10 @@ public:
         void* function_ptr;
         uintptr_t this_ptr = reinterpret_cast<uintptr_t>(this_object);
 
-#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+#if defined(ARCHITECTURE_32BIT)
         static_assert(sizeof(T) == 8, "[x64 JIT] Invalid size for member function pointer");
         std::memcpy(&function_ptr, &func, sizeof(T));
-#else
+#elif defined(ARCHITECTURE_64BIT)
         static_assert(sizeof(T) == 16, "[x64 JIT] Invalid size for member function pointer");
         uint64_t arr[2];
         std::memcpy(arr, &func, sizeof(T));
