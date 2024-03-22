@@ -7,12 +7,10 @@ class TranslatorVisitor final {
         // literally nothing
     }
 
-    void norm(Ax a, Rn b, StepZIDS bs) {
-    }
-    void swap(SwapType swap) {
-    }
+    void norm(Ax a, Rn b, StepZIDS bs) {}
+    void swap(SwapType swap) {}
     void trap() {
-        //throw UnimplementedException();
+        // throw UnimplementedException();
     }
 
     void DoMultiplication(u32 unit, bool x_sign, bool y_sign) {
@@ -2347,112 +2345,73 @@ class TranslatorVisitor final {
         DoMultiplication(1, false, true);
     }
 
-    void cmp(Ax a, Bx b) {
-    }
-    void cmp_b0_b1() {
-    }
-    void cmp_b1_b0() {
-    }
-    void cmp(Bx a, Ax b) {
-    }
-    void cmp_p1_to(Ax b) {
-    }
+    void cmp(Ax a, Bx b) {}
+    void cmp_b0_b1() {}
+    void cmp_b1_b0() {}
+    void cmp(Bx a, Ax b) {}
+    void cmp_p1_to(Ax b) {}
 
-    void MinMaxVtr(RegName a, RegName b, bool min) {
-    }
+    void MinMaxVtr(RegName a, RegName b, bool min) {}
 
-    void max2_vtr(Ax a) {
-    }
-    void min2_vtr(Ax a) {
-    }
-    void max2_vtr(Ax a, Bx b) {
-    }
-    void min2_vtr(Ax a, Bx b) {
-    }
-    void max2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-    }
-    void max2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-    }
-    void max2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-    }
-    void max2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-    }
-    void min2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-    }
-    void min2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {
-    }
-    void min2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-    }
-    void min2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {
-    }
-    void max2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-    }
-    void max2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-    }
-    void min2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-    }
-    void min2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {
-    }
+    void max2_vtr(Ax a) {}
+    void min2_vtr(Ax a) {}
+    void max2_vtr(Ax a, Bx b) {}
+    void min2_vtr(Ax a, Bx b) {}
+    void max2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {}
+    void max2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {}
+    void max2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {}
+    void max2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {}
+    void min2_vtr_movl(Ax a, Bx b, ArRn1 c, ArStep1 cs) {}
+    void min2_vtr_movh(Ax a, Bx b, ArRn1 c, ArStep1 cs) {}
+    void min2_vtr_movl(Bx a, Ax b, ArRn1 c, ArStep1 cs) {}
+    void min2_vtr_movh(Bx a, Ax b, ArRn1 c, ArStep1 cs) {}
+    void max2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {}
+    void max2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {}
+    void min2_vtr_movij(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {}
+    void min2_vtr_movji(Ax a, Bx b, ArpRn1 c, ArpStep1 csi, ArpStep1 csj) {}
 
     template <typename ArpStepX>
     void mov_sv_app(ArRn1 a, ArpStepX as, Bx b, SumBase base, bool sub_p0, bool p0_align,
-                    bool sub_p1, bool p1_align) {
-    }
+                    bool sub_p1, bool p1_align) {}
 
-    void CodebookSearch(u16 u, u16 v, u16 r, CbsCond c) {
-    }
+    void CodebookSearch(u16 u, u16 v, u16 r, CbsCond c) {}
 
-    void cbs(Axh a, CbsCond c) {
-    }
-    void cbs(Axh a, Bxh b, CbsCond c) {
-    }
-    void cbs(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, CbsCond c) {
-    }
+    void cbs(Axh a, CbsCond c) {}
+    void cbs(Axh a, Bxh b, CbsCond c) {}
+    void cbs(ArpRn1 a, ArpStep1 asi, ArpStep1 asj, CbsCond c) {}
 
     void mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
-             bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-    }
+             bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {}
 
     template <typename ArpRnX, typename ArpStepX>
     void mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
-             bool sub_p1, bool p1_align) {
-    }
+             bool sub_p1, bool p1_align) {}
 
     void mma_mx_xy(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
-                   bool p1_align) {
-    }
+                   bool p1_align) {}
 
     void mma_xy_mx(ArRn1 y, ArStep1 ys, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
-                   bool p1_align) {
-    }
+                   bool p1_align) {}
 
     void mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
-                   bool p1_align) {
-    }
+                   bool p1_align) {}
 
     void mma_mov(Axh u, Bxh v, ArRn1 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign,
                  bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
-                 bool p1_align) {
-    }
+                 bool p1_align) {}
 
     void mma_mov(ArRn2 w, ArStep1 ws, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                  bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
-                 bool p1_align) {
-    }
+                 bool p1_align) {}
 
-    void addhp(ArRn2 a, ArStep2 as, Px b, Ax c) {
-    }
+    void addhp(ArRn2 a, ArStep2 as, Px b, Ax c) {}
 
-    void mov_ext0(Imm8s a) {
-    }
-    void mov_ext1(Imm8s a) {
-    }
-    void mov_ext2(Imm8s a) {
-    }
-    void mov_ext3(Imm8s a) {
-    }
+    void mov_ext0(Imm8s a) {}
+    void mov_ext1(Imm8s a) {}
+    void mov_ext2(Imm8s a) {}
+    void mov_ext3(Imm8s a) {}
 };

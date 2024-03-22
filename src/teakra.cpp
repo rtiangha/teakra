@@ -62,7 +62,8 @@ struct Teakra::Impl {
     }
 };
 
-Teakra::Teakra(bool use_jit) : impl_jit(new Impl(true)), impl_interp(new Impl(false)),
+Teakra::Teakra(bool use_jit)
+    : impl_jit(new Impl(true)), impl_interp(new Impl(false)),
       impl(use_jit ? impl_jit.get() : impl_interp.get()), use_jit(use_jit) {}
 
 Teakra::~Teakra() = default;
@@ -122,9 +123,8 @@ void Teakra::MaskSemaphore(std::uint16_t value) {
     impl->apbp_from_dsp.MaskSemaphore(value);
 }
 void Teakra::SetAHBMCallback(const AHBMCallback& callback) {
-    impl->ahbm.SetExternalMemoryCallback(callback.read8, callback.write8,
-        callback.read16, callback.write16,
-        callback.read32, callback.write32);
+    impl->ahbm.SetExternalMemoryCallback(callback.read8, callback.write8, callback.read16,
+                                         callback.write16, callback.read32, callback.write32);
 }
 
 std::uint16_t Teakra::AHBMGetUnitSize(std::uint16_t i) const {

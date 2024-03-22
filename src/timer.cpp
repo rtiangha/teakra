@@ -1,7 +1,6 @@
 #include <limits>
 #include "crash.h"
 #include "timer.h"
-#include "crash.h"
 
 namespace Teakra {
 

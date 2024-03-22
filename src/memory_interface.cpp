@@ -4,8 +4,7 @@
 
 namespace Teakra {
 MemoryInterface::MemoryInterface(SharedMemory& shared_memory,
-                                 MemoryInterfaceUnit& memory_interface_unit,
-                                 MMIORegion& mmio_)
+                                 MemoryInterfaceUnit& memory_interface_unit, MMIORegion& mmio_)
     : shared_memory(shared_memory), memory_interface_unit(memory_interface_unit), mmio(mmio_) {}
 
 u16 MemoryInterface::ProgramRead(u32 address) const {
@@ -34,14 +33,14 @@ void MemoryInterface::DataWrite(u16 address, u16 value, bool bypass_mmio) {
 }
 
 u16 MemoryInterface::DataReadA32(u32 address) const {
-    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize*2)-1))
-        + MemoryInterfaceUnit::DataMemoryOffset;
+    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize * 2) - 1)) +
+                    MemoryInterfaceUnit::DataMemoryOffset;
     return shared_memory.ReadWord(converted);
 }
 
 void MemoryInterface::DataWriteA32(u32 address, u16 value) {
-    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize*2)-1))
-        + MemoryInterfaceUnit::DataMemoryOffset;
+    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize * 2) - 1)) +
+                    MemoryInterfaceUnit::DataMemoryOffset;
     shared_memory.WriteWord(converted, value);
 }
 

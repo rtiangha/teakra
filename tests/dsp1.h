@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cstring>
 #include <span>
 #include <vector>
-#include <cstring>
 #include "../src/common_types.h"
 
 enum class SegmentType : u8 {

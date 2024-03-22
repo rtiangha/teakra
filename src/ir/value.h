@@ -42,8 +42,7 @@ class Value {
 public:
     using CoprocessorInfo = std::array<u8, 8>;
 
-    Value()
-        : type(Type::Void) {}
+    Value() : type(Type::Void) {}
     explicit Value(Inst* inst) : type(Type::Opaque) {
         inner.inst = inst;
     }
@@ -104,24 +103,21 @@ private:
     } inner;
 };
 
-template<Type type_>
+template <Type type_>
 class TypedValue final : public Value {
 public:
     TypedValue() = default;
 
-    template<Type other_type>
-    TypedValue(const TypedValue<other_type>& value)
-        : Value(value) {
+    template <Type other_type>
+    TypedValue(const TypedValue<other_type>& value) : Value(value) {
         ASSERT((value.GetType() & type_) != Type::Void);
     }
 
-    explicit TypedValue(const Value& value)
-        : Value(value) {
+    explicit TypedValue(const Value& value) : Value(value) {
         ASSERT((value.GetType() & type_) != Type::Void);
     }
 
-    explicit TypedValue(Inst* inst)
-        : TypedValue(Value(inst)) {}
+    explicit TypedValue(Inst* inst) : TypedValue(Value(inst)) {}
 };
 
 using U1 = TypedValue<Type::U1>;

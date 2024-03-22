@@ -27,7 +27,8 @@ void Block::AppendNewInst(Opcode opcode, std::initializer_list<IR::Value> args) 
     PrependNewInst(end(), opcode, args);
 }
 
-Block::iterator Block::PrependNewInst(iterator insertion_point, Opcode opcode, std::initializer_list<Value> args) {
+Block::iterator Block::PrependNewInst(iterator insertion_point, Opcode opcode,
+                                      std::initializer_list<Value> args) {
     IR::Inst* inst = new (instruction_alloc_pool->Alloc()) IR::Inst(opcode);
     ASSERT(args.size() == inst->NumArgs());
 
@@ -137,10 +138,12 @@ const size_t& Block::CycleCount() const {
             return "FastDispatchHint{}";
         }
         std::string operator()(const Term::If& terminal) const {
-            return fmt::format("If{{{}, {}, {}}}", A64::CondToString(terminal.if_), TerminalToString(terminal.then_), TerminalToString(terminal.else_));
+            return fmt::format("If{{{}, {}, {}}}", A64::CondToString(terminal.if_),
+TerminalToString(terminal.then_), TerminalToString(terminal.else_));
         }
         std::string operator()(const Term::CheckBit& terminal) const {
-            return fmt::format("CheckBit{{{}, {}}}", TerminalToString(terminal.then_), TerminalToString(terminal.else_));
+            return fmt::format("CheckBit{{{}, {}}}", TerminalToString(terminal.then_),
+TerminalToString(terminal.else_));
         }
         std::string operator()(const Term::CheckHalt& terminal) const {
             return fmt::format("CheckHalt{{{}}}", TerminalToString(terminal.else_));
@@ -221,7 +224,8 @@ std::string DumpBlock(const IR::Block& block) {
             Type actual_type = arg.GetType();
             Type expected_type = GetArgTypeOf(op, arg_index);
             if (!AreTypesCompatible(actual_type, expected_type)) {
-                ret += fmt::format("<type error: {} != {}>", GetNameOf(actual_type), GetNameOf(expected_type));
+                ret += fmt::format("<type error: {} != {}>", GetNameOf(actual_type),
+    GetNameOf(expected_type));
             }
         }
 
@@ -236,4 +240,4 @@ std::string DumpBlock(const IR::Block& block) {
     return "";
 }
 
-}  // namespace Teakra::IR
+} // namespace Teakra::IR

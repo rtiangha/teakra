@@ -1,21 +1,21 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <experimental/optional>
-#include <vector>
 #include <cstring>
+#include <vector>
+#include <experimental/optional>
 
 #include "audio.h"
 #include "dsp.h"
 
-#define VERIFY(call)                       \
-if (R_FAILED(call)) {                  \
-        printf("failed at %s\n", #call);   \
-        return nullopt;                    \
-}
+#define VERIFY(call)                                                                               \
+    if (R_FAILED(call)) {                                                                          \
+        printf("failed at %s\n", #call);                                                           \
+        return nullopt;                                                                            \
+    }
 
 std::vector<u8> loadDspFirmFromFile() {
-    FILE *f = fopen("dspaudio.cdc", "rb");
+    FILE* f = fopen("dspaudio.cdc", "rb");
 
     if (!f) {
         printf("Couldn't find dspfirm\n");
@@ -41,15 +41,15 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
         if (type == InterruptType::Pipe && pipe == DspPipe::Audio) {
             irq2 = true;
         }
-        //std::printf("SetInterruptHandler type=%d pipe=%d\n", type, pipe);
+        // std::printf("SetInterruptHandler type=%d pipe=%d\n", type, pipe);
     });
 
     lle.LoadComponent(dspfirm);
 
-    //VERIFY(DSP_GetSemaphoreHandle(&dsp_semaphore));
+    // VERIFY(DSP_GetSemaphoreHandle(&dsp_semaphore));
 
     lle.teakra.MaskSemaphore(0x2000);
-    //VERIFY(DSP_SetSemaphoreMask(0x2000));
+    // VERIFY(DSP_SetSemaphoreMask(0x2000));
 
     {
         // dsp_mode == 0 (request initialisation of DSP)
@@ -76,11 +76,11 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
     // VERIFY(svcClearEvent(pipe2_irq));
 
     {
-        //VERIFY(DSP_ReadPipeIfPossible(2, 0, &num_structs, 2, &len_read));
-        //if (len_read != 2) {
-        //   printf("Reading struct addrs header: Could only read %i bytes!\n", len_read);
-        //    return nullopt;
-        //}
+        // VERIFY(DSP_ReadPipeIfPossible(2, 0, &num_structs, 2, &len_read));
+        // if (len_read != 2) {
+        //    printf("Reading struct addrs header: Could only read %i bytes!\n", len_read);
+        //     return nullopt;
+        // }
 
         u16 num_structs = 0;
         const auto num_structs_buf = lle.PipeRead(DspPipe::Audio, 2);
@@ -89,11 +89,11 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
 
         assert(num_structs == 15);
 
-        //VERIFY(DSP_ReadPipeIfPossible(2, 0, dsp_addrs.data(), 30, &len_read));
-        //if (len_read != 30) {
-        //    printf("Reading struct addrs body: Could only read %i bytes!\n", len_read);
-        //    return nullopt;
-        //}
+        // VERIFY(DSP_ReadPipeIfPossible(2, 0, dsp_addrs.data(), 30, &len_read));
+        // if (len_read != 30) {
+        //     printf("Reading struct addrs body: Could only read %i bytes!\n", len_read);
+        //     return nullopt;
+        // }
 
         std::array<u16, 15> dsp_addrs;
         const auto dsp_addrs_buf = lle.PipeRead(DspPipe::Audio, 30);
@@ -110,15 +110,21 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
         for (int i = 0; i < 2; i++) {
             shared_mem[i].frame_counter = reinterpret_cast<u16*>(dsp_structs[0][i]);
 
-            shared_mem[i].source_configurations = reinterpret_cast<DSP::HLE::SourceConfiguration*>(dsp_structs[1][i]);
-            shared_mem[i].source_statuses = reinterpret_cast<DSP::HLE::SourceStatus*>(dsp_structs[2][i]);
-            shared_mem[i].adpcm_coefficients = reinterpret_cast<DSP::HLE::AdpcmCoefficients*>(dsp_structs[3][i]);
+            shared_mem[i].source_configurations =
+                reinterpret_cast<DSP::HLE::SourceConfiguration*>(dsp_structs[1][i]);
+            shared_mem[i].source_statuses =
+                reinterpret_cast<DSP::HLE::SourceStatus*>(dsp_structs[2][i]);
+            shared_mem[i].adpcm_coefficients =
+                reinterpret_cast<DSP::HLE::AdpcmCoefficients*>(dsp_structs[3][i]);
 
-            shared_mem[i].dsp_configuration = reinterpret_cast<DSP::HLE::DspConfiguration*>(dsp_structs[4][i]);
+            shared_mem[i].dsp_configuration =
+                reinterpret_cast<DSP::HLE::DspConfiguration*>(dsp_structs[4][i]);
             shared_mem[i].dsp_status = reinterpret_cast<DSP::HLE::DspStatus*>(dsp_structs[5][i]);
 
-            shared_mem[i].final_samples = reinterpret_cast<DSP::HLE::FinalMixSamples*>(dsp_structs[6][i]);
-            shared_mem[i].intermediate_mix_samples = reinterpret_cast<DSP::HLE::IntermediateMixSamples*>(dsp_structs[7][i]);
+            shared_mem[i].final_samples =
+                reinterpret_cast<DSP::HLE::FinalMixSamples*>(dsp_structs[6][i]);
+            shared_mem[i].intermediate_mix_samples =
+                reinterpret_cast<DSP::HLE::IntermediateMixSamples*>(dsp_structs[7][i]);
 
             shared_mem[i].compressor = reinterpret_cast<DSP::HLE::Compressor*>(dsp_structs[8][i]);
 
@@ -137,19 +143,28 @@ AudioState::AudioState(std::vector<u8>&& dspfirm) {
         for (int i = 0; i < 2; i++) {
             shared_mem_interp[i].frame_counter = reinterpret_cast<u16*>(dsp_structs[0][i]);
 
-            shared_mem_interp[i].source_configurations = reinterpret_cast<DSP::HLE::SourceConfiguration*>(dsp_structs[1][i]);
-            shared_mem_interp[i].source_statuses = reinterpret_cast<DSP::HLE::SourceStatus*>(dsp_structs[2][i]);
-            shared_mem_interp[i].adpcm_coefficients = reinterpret_cast<DSP::HLE::AdpcmCoefficients*>(dsp_structs[3][i]);
+            shared_mem_interp[i].source_configurations =
+                reinterpret_cast<DSP::HLE::SourceConfiguration*>(dsp_structs[1][i]);
+            shared_mem_interp[i].source_statuses =
+                reinterpret_cast<DSP::HLE::SourceStatus*>(dsp_structs[2][i]);
+            shared_mem_interp[i].adpcm_coefficients =
+                reinterpret_cast<DSP::HLE::AdpcmCoefficients*>(dsp_structs[3][i]);
 
-            shared_mem_interp[i].dsp_configuration = reinterpret_cast<DSP::HLE::DspConfiguration*>(dsp_structs[4][i]);
-            shared_mem_interp[i].dsp_status = reinterpret_cast<DSP::HLE::DspStatus*>(dsp_structs[5][i]);
+            shared_mem_interp[i].dsp_configuration =
+                reinterpret_cast<DSP::HLE::DspConfiguration*>(dsp_structs[4][i]);
+            shared_mem_interp[i].dsp_status =
+                reinterpret_cast<DSP::HLE::DspStatus*>(dsp_structs[5][i]);
 
-            shared_mem_interp[i].final_samples = reinterpret_cast<DSP::HLE::FinalMixSamples*>(dsp_structs[6][i]);
-            shared_mem_interp[i].intermediate_mix_samples = reinterpret_cast<DSP::HLE::IntermediateMixSamples*>(dsp_structs[7][i]);
+            shared_mem_interp[i].final_samples =
+                reinterpret_cast<DSP::HLE::FinalMixSamples*>(dsp_structs[6][i]);
+            shared_mem_interp[i].intermediate_mix_samples =
+                reinterpret_cast<DSP::HLE::IntermediateMixSamples*>(dsp_structs[7][i]);
 
-            shared_mem_interp[i].compressor = reinterpret_cast<DSP::HLE::Compressor*>(dsp_structs[8][i]);
+            shared_mem_interp[i].compressor =
+                reinterpret_cast<DSP::HLE::Compressor*>(dsp_structs[8][i]);
 
-            shared_mem_interp[i].dsp_debug = reinterpret_cast<DSP::HLE::DspDebug*>(dsp_structs[9][i]);
+            shared_mem_interp[i].dsp_debug =
+                reinterpret_cast<DSP::HLE::DspDebug*>(dsp_structs[9][i]);
         }
 
         dsp_structs[0][0][0] = frame_id;
@@ -186,7 +201,8 @@ void AudioState::initSharedMem(bool is_jit) {
         }
 
         {
-            config.interpolation_mode = DSP::HLE::SourceConfiguration::Configuration::InterpolationMode::None;
+            config.interpolation_mode =
+                DSP::HLE::SourceConfiguration::Configuration::InterpolationMode::None;
             config.interpolation_related = 0;
             config.interpolation_dirty.Assign(1);
         }
@@ -220,9 +236,7 @@ void AudioState::initSharedMem(bool is_jit) {
             config.sync_dirty.Assign(1);
         }
 
-        {
-            config.reset_flag.Assign(1);
-        }
+        { config.reset_flag.Assign(1); }
     }
 
     {
@@ -235,7 +249,8 @@ void AudioState::initSharedMem(bool is_jit) {
     }
 
     {
-        write(is_jit).dsp_configuration->output_format = DSP::HLE::DspConfiguration::OutputFormat::Stereo;
+        write(is_jit).dsp_configuration->output_format =
+            DSP::HLE::DspConfiguration::OutputFormat::Stereo;
         write(is_jit).dsp_configuration->output_format_dirty.Assign(1);
     }
 
@@ -272,5 +287,5 @@ void AudioState::notifyDsp() {
     write(false).frame_counter[0] = frame_id;
     frame_id++;
     lle.SetSemaphore(0x2000);
-    //svcSignalEvent(dsp_semaphore);
+    // svcSignalEvent(dsp_semaphore);
 }

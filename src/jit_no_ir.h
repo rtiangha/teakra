@@ -1,24 +1,24 @@
 #pragma once
-#include "shared_memory.h"
-#include <utility>
 #include <atomic>
-#include <tuple>
 #include <optional>
+#include <set>
+#include <stack>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <xbyak/xbyak.h>
 #include "bit.h"
-#include <set>
-#include <stack>
 #include "core_timing.h"
-#include "memory_interface.h"
-#include "interpreter.h"
-#include "operand.h"
 #include "hash.h"
-#include "mmio.h"
+#include "interpreter.h"
 #include "jit_regs.h"
+#include "memory_interface.h"
+#include "mmio.h"
+#include "operand.h"
 #include "register.h"
+#include "shared_memory.h"
 #include "xbyak_abi.h"
 
 #ifdef WIN32
@@ -40,7 +40,7 @@ struct ArArpSettings {
 
 std::string Do(std::uint16_t opcode, std::uint16_t expansion = 0,
                std::optional<ArArpSettings> ar_arp = std::nullopt);
-}
+} // namespace Teakra::Disassembler
 
 namespace Teakra {
 
@@ -54,8 +54,10 @@ struct alignas(16) StackLayout {
 };
 
 class EmitX64 {
-    // Technically there's prpage which would make this 22 bits wide, but it's always zero so whatever.
+    // Technically there's prpage which would make this 22 bits wide, but it's always zero so
+    // whatever.
     static constexpr size_t BlockCacheSize = 1ULL << 18;
+
 public:
     EmitX64(CoreTiming& core_timing, JitRegisters& regs, MemoryInterface& mem)
         : core_timing(core_timing), regs(regs), mem(mem), c(MAX_CODE_SIZE) {
@@ -70,7 +72,7 @@ public:
     using RunCodeFuncType = void (*)(EmitX64*);
     RunCodeFuncType run_code{};
 
-    using BlockFunc = void(*)(JitRegisters*);
+    using BlockFunc = void (*)(JitRegisters*);
 
     struct BlockSwapState {
         Mod1 mod1{};
@@ -85,17 +87,31 @@ public:
         Mod1,
         Mod0,
         Mod2,
-        Arp0, Arp1, Arp2, Arp3,
-        Ar0, Ar1, Pad0,
+        Arp0,
+        Arp1,
+        Arp2,
+        Arp3,
+        Ar0,
+        Ar1,
+        Pad0,
         Mod1b,
         Mod0b,
         Mod2b,
-        Arp0b, Arp1b, Arp2b, Arp3b,
-        Ar0b, Ar1b, Pad1,
-        Cfgi, Cfgj,
-        Stepi0, Stepj0,
-        Cfgib, Cfgjb,
-        Stepi0b, Stepj0b,
+        Arp0b,
+        Arp1b,
+        Arp2b,
+        Arp3b,
+        Ar0b,
+        Ar1b,
+        Pad1,
+        Cfgi,
+        Cfgj,
+        Stepi0,
+        Stepj0,
+        Cfgib,
+        Cfgjb,
+        Stepi0b,
+        Stepj0b,
     };
 
     union KeyMask {
@@ -127,10 +143,12 @@ public:
         }
 
         void MaskAllCntx() {
-            for (u32 i = static_cast<u32>(KeyPart::Mod1); i <= static_cast<u32>(KeyPart::Ar1); i++) {
+            for (u32 i = static_cast<u32>(KeyPart::Mod1); i <= static_cast<u32>(KeyPart::Ar1);
+                 i++) {
                 mask->Mask(i);
             }
-            for (u32 i = static_cast<u32>(KeyPart::Mod1b); i <= static_cast<u32>(KeyPart::Ar1b); i++) {
+            for (u32 i = static_cast<u32>(KeyPart::Mod1b); i <= static_cast<u32>(KeyPart::Ar1b);
+                 i++) {
                 mask->Mask(i);
             }
         }
@@ -155,13 +173,15 @@ public:
 
         template <bool is_shadow = false>
         ArU& GetAr(u32 i) {
-            mask->Mask(is_shadow ? static_cast<u32>(KeyPart::Ar0) + i : static_cast<u32>(KeyPart::Ar0b) + i);
+            mask->Mask(is_shadow ? static_cast<u32>(KeyPart::Ar0) + i
+                                 : static_cast<u32>(KeyPart::Ar0b) + i);
             return is_shadow ? shadow.ar[i] : curr.ar[i];
         }
 
         template <bool is_shadow = false>
         ArpU& GetArp(u32 i) {
-            mask->Mask(is_shadow ? static_cast<u32>(KeyPart::Arp0) + i : static_cast<u32>(KeyPart::Arp0b) + i);
+            mask->Mask(is_shadow ? static_cast<u32>(KeyPart::Arp0) + i
+                                 : static_cast<u32>(KeyPart::Arp0b) + i);
             return is_shadow ? shadow.arp[i] : curr.arp[i];
         }
 
@@ -354,7 +374,7 @@ public:
         desc.key = block_key;
         current_blk = &desc;
         CompileBlock();
-        //printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
+        // printf("Compiling block at 0x%x with size = %d\n", blk_key.pc, blk.cycles);
     }
 
     void DoInterruptsAndRunDebug() {
@@ -407,9 +427,9 @@ public:
         call_stack = {};
         block_key.SetMask(&current_blk->mask);
 
-        //Disassembler::ArArpSettings settings;
-        //std::memcpy(&settings.ar, &blk_key.curr.ar, sizeof(settings.ar));
-        //std::memcpy(&settings.arp, &blk_key.curr.arp, sizeof(settings.arp));
+        // Disassembler::ArArpSettings settings;
+        // std::memcpy(&settings.ar, &blk_key.curr.ar, sizeof(settings.ar));
+        // std::memcpy(&settings.arp, &blk_key.curr.arp, sizeof(settings.arp));
 
         compiling = true;
         while (compiling) {
@@ -432,7 +452,8 @@ public:
                 c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc); // Loop done, move to next
                 c.jmp(end_label);
                 c.L(jump_back_label);
-                c.sub(word[REGS + offsetof(JitRegisters, repc)], 1); // Loop not done, go back to current
+                c.sub(word[REGS + offsetof(JitRegisters, repc)],
+                      1); // Loop not done, go back to current
                 c.mov(dword[REGS + offsetof(JitRegisters, pc)], current_pc);
                 c.L(end_label);
                 compiling = false;
@@ -442,8 +463,8 @@ public:
                 EmitBkrepReturn(regs.pc);
             }
 
-            //const auto name = Disassembler::Do(opcode, expand_value, settings);
-            //printf("%s\n", name.c_str());
+            // const auto name = Disassembler::Do(opcode, expand_value, settings);
+            // printf("%s\n", name.c_str());
         }
 
         // Mask entry key with generated mask.
@@ -713,7 +734,8 @@ public:
         c.push(r15);
 
         c.mov(rbp, rsp);
-        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16
+        // bytes to respect the ABI
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
@@ -795,7 +817,8 @@ public:
         c.push(r15);
 
         c.mov(rbp, rsp);
-        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16
+        // bytes to respect the ABI
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
@@ -846,7 +869,8 @@ public:
         c.push(r15);
 
         c.mov(rbp, rsp);
-        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16
+        // bytes to respect the ABI
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
@@ -1628,19 +1652,20 @@ public:
                     // regs.fv = value != 0;
                     c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
                     c.test(value, value);
-                    c.setne(cl); // u32 mask = (value != 0) ? 1 : 0
+                    c.setne(cl);                              // u32 mask = (value != 0) ? 1 : 0
                     c.shl(cx, decltype(Flags::fv)::position); // mask <<= fv_pos
-                    c.or_(FLAGS, cx); // flags |= mask
+                    c.or_(FLAGS, cx);                         // flags |= mask
                     // if (regs.fv) {
                     //    regs.fvl = 1;
                     // }
-                    static_assert(decltype(Flags::fv)::position - decltype(Flags::fvl)::position == 3);
+                    static_assert(decltype(Flags::fv)::position - decltype(Flags::fvl)::position ==
+                                  3);
                     // mask is either 0 or 1. If it was 0, then the or_ wont have any effect.
                     // If it was 1, it will set fvl, which is what we want.
                     c.shr(cx, 3); // mask >>= 3;
                     c.or_(FLAGS, cx);
                 }
-                c.xor_(value.cvt32(), value.cvt32()); // value = 0;
+                c.xor_(value.cvt32(), value.cvt32());       // value = 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
             } else {
                 if (mod0.s == 0) {
@@ -1650,12 +1675,13 @@ public:
                     SignExtend(rcx, 40);
                     SignExtend(rdx, 40 - sv);
 
-                           // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
+                    // regs.fv = SignExtend<40>(value) != SignExtend(value, 40 - sv);
                     c.and_(FLAGS, ~decltype(Flags::fv)::mask); // clear fv
                     c.cmp(rcx, rdx);
-                    c.setne(cl); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv) ? 1 : 0
+                    c.setne(cl); // u32 mask = (SignExtend<40>(value) != SignExtend(value, 40 - sv)
+                                 // ? 1 : 0
                     c.shl(cl, decltype(Flags::fv)::position); // mask <<= fv_pos
-                    c.or_(FLAGS.cvt8(), cl); // flags |= mask
+                    c.or_(FLAGS.cvt8(), cl);                  // flags |= mask
                     // if (regs.fv) {
                     //     regs.fvl = 1;
                     // }
@@ -1666,7 +1692,7 @@ public:
                 // regs.fc0 = (value & ((u64)1 << 40)) != 0;
                 c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // clear fc0
                 c.bt(value, 40);
-                c.setc(cl); // u32 mask = (value & ((u64)1 << 40));
+                c.setc(cl);                                // u32 mask = (value & ((u64)1 << 40));
                 c.shl(cl, decltype(Flags::fc0)::position); // mask <<= fc0_pos;
                 c.or_(FLAGS.cvt8(), cl);
             }
@@ -1679,7 +1705,7 @@ public:
                     // regs.fc0 = (value >> 39) & 1;
                     // value = regs.fc0 ? 0xFF'FFFF'FFFF : 0;
                 } else {
-                    c.xor_(value.cvt32(), value.cvt32()); // value = 0;
+                    c.xor_(value.cvt32(), value.cvt32());       // value = 0;
                     c.and_(FLAGS, ~decltype(Flags::fc0)::mask); // regs.fc0 = 0;
                 }
             } else {
@@ -1890,7 +1916,8 @@ public:
             c.add(result, b);
         }
         if constexpr (update_flags) {
-            c.and_(FLAGS, ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
+            c.and_(FLAGS,
+                   ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
             c.xor_(esi, esi);
             c.bt(result, 40);
             c.setc(rsi.cvt8());
@@ -1947,14 +1974,14 @@ public:
                 c.and_(acc, rbx);
                 c.xor_(rbx, rbx);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setc(bl); // u16 old_fc = regs.fc0;
+                c.setc(bl);                                   // u16 old_fc = regs.fc0;
                 c.shl(rbx, 40);
                 c.or_(acc, rbx); // value |= (u64)old_fc << 40;
-                c.bt(acc, 1); // u32 mask = value & 1;
-                c.setc(bl); // mask <<= fc0_pos;
+                c.bt(acc, 1);    // u32 mask = value & 1;
+                c.setc(bl);      // mask <<= fc0_pos;
                 c.shl(bl, decltype(Flags::fc0)::position);
                 c.or_(FLAGS.cvt8(), bx); // flags |= mask;
-                c.shr(acc, 1); // value >>= 1;
+                c.shr(acc, 1);           // value >>= 1;
                 SignExtend(acc, 40);
                 SetAccAndFlag(a, acc);
                 break;
@@ -1963,9 +1990,9 @@ public:
                 GetAcc(acc, a);
                 c.xor_(rbx, rbx);
                 c.btr(FLAGS, decltype(Flags::fc0)::position); // test and clear fc0
-                c.setc(bl); // u16 old_fc = regs.fc0;
-                c.shl(acc, 1); // value <<= 1;
-                c.or_(acc, rbx); // value |= old_fc;
+                c.setc(bl);                                   // u16 old_fc = regs.fc0;
+                c.shl(acc, 1);                                // value <<= 1;
+                c.or_(acc, rbx);                              // value |= old_fc;
                 c.bt(acc, 40);
                 c.setc(bl);
                 c.shl(bl, decltype(Flags::fc0)::position);
@@ -1986,7 +2013,8 @@ public:
             }
             case ModaOp::Neg: {
                 GetAcc(acc, a);
-                c.and_(FLAGS, ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
+                c.and_(FLAGS,
+                       ~(decltype(Flags::fc0)::mask | decltype(Flags::fv)::mask)); // clear fc0, fv
                 const Reg64 scratch = rbx;
                 c.test(acc, acc);
                 c.setnz(scratch.cvt8());
@@ -2157,8 +2185,10 @@ public:
         c.shl(start_end, 16);
         LoadFromMemory(start_end, address_reg);
         c.add(address_reg, 1);
-        c.mov(qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)], start_end);
-        LoadFromMemory(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)], address_reg);
+        c.mov(qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)],
+              start_end);
+        LoadFromMemory(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)],
+                       address_reg);
         c.add(address_reg, 1);
     }
 
@@ -2168,9 +2198,11 @@ public:
         c.movzx(flag, word[REGS + offsetof(JitRegisters, lp)]);
         c.shl(flag, 15);
         const Reg64 start_end = IsWindows() ? rsi : rdx;
-        c.mov(start_end, qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)]);
+        c.mov(start_end,
+              qword[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, start)]);
         c.sub(address_reg, 1);
-        StoreToMemory(address_reg, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)]);
+        StoreToMemory(address_reg,
+                      word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(Frame, lc)]);
         c.sub(address_reg, 1);
         StoreToMemory(address_reg, start_end);
         c.shr(start_end, 16);
@@ -2397,9 +2429,7 @@ public:
 
     void ret(Cond cond) {
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        ConditionPass(cond, [&] {
-            EmitPopPC();
-        });
+        ConditionPass(cond, [&] { EmitPopPC(); });
         // If the last call instruction had a static target and this instruction
         // always returns, we don't have to stop compiling.
         if (cond.GetName() == CondValue::True && !call_stack.empty()) {
@@ -2414,7 +2444,7 @@ public:
     }
     void reti(Cond cond) {
         c.mov(dword[REGS + offsetof(JitRegisters, pc)], regs.pc);
-        ConditionPass(cond, [&]{
+        ConditionPass(cond, [&] {
             EmitPopPC();
             c.mov(word[REGS + offsetof(JitRegisters, ie)], 1);
         });
@@ -2506,7 +2536,8 @@ public:
     void load_ps01(Imm4 a) {
         const u16 ps0 = a.Unsigned16() & 3;
         const u16 ps1 = a.Unsigned16() >> 2;
-        const u16 mask = (ps0 << decltype(Mod0::ps0)::position) | (ps1 << decltype(Mod0::ps1)::position);
+        const u16 mask =
+            (ps0 << decltype(Mod0::ps0)::position) | (ps1 << decltype(Mod0::ps1)::position);
         c.mov(ax, word[REGS + offsetof(JitRegisters, mod0)]);
         c.and_(ax, ~(decltype(Mod0::ps0)::mask | decltype(Mod0::ps1)::mask));
         c.or_(ax, mask);
@@ -2678,7 +2709,8 @@ public:
         const Reg64 sp = rbx;
         c.movzx(sp, word[REGS + offsetof(JitRegisters, sp)]);
         const Reg64 value = rcx;
-        const Reg32 tmp = eax; // Register used just for truncating the accumulator register to 32 bits
+        const Reg32 tmp =
+            eax; // Register used just for truncating the accumulator register to 32 bits
         EmitLoadFromMemory<true>(value, sp);
         c.add(word[REGS + offsetof(JitRegisters, sp)], 1);
         c.movsx(value.cvt32(), value.cvt8());
@@ -3124,7 +3156,8 @@ public:
         c.push(r15);
 
         c.mov(rbp, rsp);
-        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16 bytes to respect the ABI
+        // Reserve a bunch of stack space for Windows shadow stack et al, then force align rsp to 16
+        // bytes to respect the ABI
         c.sub(rsp, 64);
         c.and_(rsp, ~0xF);
 
@@ -3352,7 +3385,8 @@ public:
         NOT_IMPLEMENTED();
     }
     void mov_sv_to(MemImm8 b) {
-        StoreToMemory(b.Unsigned16() + (block_key.GetMod1().page << 8), word[REGS + offsetof(JitRegisters, sv)]);
+        StoreToMemory(b.Unsigned16() + (block_key.GetMod1().page << 8),
+                      word[REGS + offsetof(JitRegisters, sv)]);
     }
     void mov_x0_to(Ab b) {
         NOT_IMPLEMENTED();
@@ -4722,7 +4756,7 @@ private:
             c.xor_(scratch.cvt32(), scratch.cvt32());
             c.and_(FLAGS.cvt32(), ACC_MASK); // clear fz, fm, fe, fn
             c.test(value, value);
-            c.setz(scratch.cvt8()); // mask = (value == 0) ? 1 : 0;
+            c.setz(scratch.cvt8());                        // mask = (value == 0) ? 1 : 0;
             c.shl(scratch, decltype(Flags::fz)::position); // mask <<= fz_pos
             // regs.fz = value == 0;
             c.or_(FLAGS, scratch); // flags |= mask
@@ -4744,7 +4778,7 @@ private:
             c.or_(FLAGS.cvt8(), scratch.cvt8());
             c.shl(scratch, 16 - decltype(Flags::fe)::position);
             c.btc(scratch, 16);
-            c.bt(value, 31);  // u64 bit31 = (value >> 31) & 1;
+            c.bt(value, 31); // u64 bit31 = (value >> 31) & 1;
             c.setc(dl);
             c.bt(value, 30); // u64 bit30 = (value >> 30) & 1;
             c.setc(dh);
@@ -4905,12 +4939,12 @@ private:
             c.and_(esi, 13107);
             c.shr(value.cvt32(), 2);
             c.and_(value.cvt32(), 13107);
-            c.lea(esi, ptr[value + 4*rsi]);
+            c.lea(esi, ptr[value + 4 * rsi]);
             c.mov(edx, esi);
             c.and_(edx, 21845);
             c.shr(esi, 1);
             c.and_(esi, 21845);
-            c.lea(esi, ptr[rsi + 2*rdx]);
+            c.lea(esi, ptr[rsi + 2 * rdx]);
             c.mov(value.cvt32(), esi);
         }
     }
@@ -4948,14 +4982,15 @@ private:
             // Note: This section has a LOT of register pressure!
             const Reg16 tmp = si;
             c.mov(tmp, address);
-            c.add(address, 1); 
+            c.add(address, 1);
             c.and_(tmp, mask);
             c.cmp(tmp, mod);
             c.jne(addressDoesNotEqualMask);
             // Subtract 1 to get the original value
             c.mov(tmp, ~mask);
             c.sub(address, 1);
-            // Xbyak seems to have issues with AND r, imm16, so we need to store the value to a register
+            // Xbyak seems to have issues with AND r, imm16, so we need to store the value to a
+            // register
             c.and_(address, tmp);
             c.L(addressDoesNotEqualMask);
         } else { // OffsetValue::MinusOne
@@ -5412,7 +5447,8 @@ private:
     template <typename ArpRnX>
     std::tuple<u16, u16> GetArpRnUnit(ArpRnX arprn) {
         static_assert(std::is_same_v<ArpRnX, ArpRn1> || std::is_same_v<ArpRnX, ArpRn2>);
-        return std::make_tuple(block_key.GetArp(arprn.Index()).arprni, block_key.GetArp(arprn.Index()).arprnj + 4);
+        return std::make_tuple(block_key.GetArp(arprn.Index()).arprni,
+                               block_key.GetArp(arprn.Index()).arprnj + 4);
     }
 
     template <typename ArpStepX>
@@ -5451,15 +5487,15 @@ private:
 
     static RegName CounterAcc(RegName in) {
         static std::unordered_map<RegName, RegName> map{
-                                                        {RegName::a0, RegName::a1},   {RegName::a1, RegName::a0},
-                                                        {RegName::b0, RegName::b1},   {RegName::b1, RegName::b0},
-                                                        {RegName::a0l, RegName::a1l}, {RegName::a1l, RegName::a0l},
-                                                        {RegName::b0l, RegName::b1l}, {RegName::b1l, RegName::b0l},
-                                                        {RegName::a0h, RegName::a1h}, {RegName::a1h, RegName::a0h},
-                                                        {RegName::b0h, RegName::b1h}, {RegName::b1h, RegName::b0h},
-                                                        {RegName::a0e, RegName::a1e}, {RegName::a1e, RegName::a0e},
-                                                        {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
-                                                        };
+            {RegName::a0, RegName::a1},   {RegName::a1, RegName::a0},
+            {RegName::b0, RegName::b1},   {RegName::b1, RegName::b0},
+            {RegName::a0l, RegName::a1l}, {RegName::a1l, RegName::a0l},
+            {RegName::b0l, RegName::b1l}, {RegName::b1l, RegName::b0l},
+            {RegName::a0h, RegName::a1h}, {RegName::a1h, RegName::a0h},
+            {RegName::b0h, RegName::b1h}, {RegName::b1h, RegName::b0h},
+            {RegName::a0e, RegName::a1e}, {RegName::a1e, RegName::a0e},
+            {RegName::b0e, RegName::b1e}, {RegName::b1e, RegName::b0e},
+        };
         return map.at(in);
     }
 };

@@ -11,7 +11,7 @@ class MemoryInterfaceUnit {
 public:
     u16 x_page = 0, y_page = 0, z_page = 0;
     u32 x_off_storage = 0, y_off_storage = 0, z_off_storage = 0;
-    u32* x_offset{&x_off_storage}, *y_offset{&y_off_storage}, *z_offset{&z_off_storage};
+    u32 *x_offset{&x_off_storage}, *y_offset{&y_off_storage}, *z_offset{&z_off_storage};
     std::array<u16, 2> x_size{{0x20, 0x20}};
     std::array<u16, 2> y_size{{0x1E, 0x1E}};
     u16 page_mode_storage = 0;
@@ -86,13 +86,16 @@ public:
                     MMIORegion& mmio);
     u16 ProgramRead(u32 address) const;
     void ProgramWrite(u32 address, u16 value);
-    u16 DataRead(u16 address, bool bypass_mmio = false); // not const because it can be a FIFO register
+    u16 DataRead(u16 address,
+                 bool bypass_mmio = false); // not const because it can be a FIFO register
     void DataWrite(u16 address, u16 value, bool bypass_mmio = false);
     u16 DataReadA32(u32 address) const;
     void DataWriteA32(u32 address, u16 value);
     u16 MMIORead(u16 address);
     void MMIOWrite(u16 address, u16 value);
-    SharedMemory& GetMemory() { return shared_memory; }
+    SharedMemory& GetMemory() {
+        return shared_memory;
+    }
 
 public:
     SharedMemory& shared_memory;

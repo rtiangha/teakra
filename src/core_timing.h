@@ -1,16 +1,16 @@
 #pragma once
 
 #include <array>
-#include "common_types.h"
 #include "btdmp.h"
+#include "common_types.h"
 #include "timer.h"
 
 namespace Teakra {
 
 class CoreTiming {
 public:
-    CoreTiming(std::array<Timer, 2>& timer_, std::array<Btdmp, 2>& btdmp_) :
-          timer{timer_}, btdmp{btdmp_} {}
+    CoreTiming(std::array<Timer, 2>& timer_, std::array<Btdmp, 2>& btdmp_)
+        : timer{timer_}, btdmp{btdmp_} {}
 
     void Tick(u64 ticks = 1) {
         timer[0].Tick(ticks);

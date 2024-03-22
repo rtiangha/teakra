@@ -2,9 +2,9 @@
 
 #include <atomic>
 #include <cassert>
-#include <vector>
-#include <span>
 #include <functional>
+#include <span>
+#include <vector>
 #include "audio_types.h"
 #include "dsp1.h"
 #include "teakra/teakra.h"
@@ -14,12 +14,8 @@ public:
     explicit DspLle() {
         fcram = std::make_unique<u8[]>(FCRAM_N3DS_SIZE);
         Teakra::AHBMCallback ahbm;
-        ahbm.read8 = [this](u32 address) -> u8 {
-            return fcram.get()[address - FCRAM_PADDR];
-        };
-        ahbm.write8 = [this](u32 address, u8 value) {
-            fcram.get()[address - FCRAM_PADDR] = value;
-        };
+        ahbm.read8 = [this](u32 address) -> u8 { return fcram.get()[address - FCRAM_PADDR]; };
+        ahbm.write8 = [this](u32 address, u8 value) { fcram.get()[address - FCRAM_PADDR] = value; };
         ahbm.read16 = [this](u32 address) -> u16 {
             u16 value;
             std::memcpy(&value, fcram.get() + address - FCRAM_PADDR, sizeof(u16));
@@ -37,14 +33,11 @@ public:
             std::memcpy(fcram.get() + address - FCRAM_PADDR, &value, sizeof(u32));
         };
         teakra.SetAHBMCallback(ahbm);
-        teakra.SetAudioCallback(
-            [](std::array<s16, 2> sample) {
-                //std::printf("Pushing sample 0x%x\n", std::bit_cast<u32>(sample));
-            });
+        teakra.SetAudioCallback([](std::array<s16, 2> sample) {
+            // std::printf("Pushing sample 0x%x\n", std::bit_cast<u32>(sample));
+        });
     }
-    ~DspLle() {
-
-    }
+    ~DspLle() {}
 
     u16 RecvData(u32 register_number) {
         while (!teakra.RecvDataIsReady(register_number)) {
@@ -81,8 +74,7 @@ public:
         teakra.Run(TeakraSlice);
     }
 
-    void SetInterruptHandler(
-        std::function<void(InterruptType type, DspPipe pipe)> handler) {
+    void SetInterruptHandler(std::function<void(InterruptType type, DspPipe pipe)> handler) {
         teakra.SetRecvDataHandler(0, [this, handler]() {
             if (!loaded) {
                 return;
@@ -144,9 +136,11 @@ public:
             for (const auto& segment : dsp.segments) {
                 if (segment.memory_type == SegmentType::ProgramA ||
                     segment.memory_type == SegmentType::ProgramB) {
-                    std::memcpy(program + segment.target * 2, segment.data.data(), segment.data.size());
+                    std::memcpy(program + segment.target * 2, segment.data.data(),
+                                segment.data.size());
                 } else if (segment.memory_type == SegmentType::Data) {
-                    std::memcpy(data + segment.target * 2, segment.data.data(), segment.data.size());
+                    std::memcpy(data + segment.target * 2, segment.data.data(),
+                                segment.data.size());
                 }
             }
         };
@@ -155,7 +149,7 @@ public:
         load_firmware(teakra.GetInterpDspMemory());
 
         // TODO: load special segment
-        //core_timing.ScheduleEvent(TeakraSlice, teakra_slice_event, 0);
+        // core_timing.ScheduleEvent(TeakraSlice, teakra_slice_event, 0);
 
         // Wait for initialization
         if (dsp.recv_data_on_start) {
@@ -190,7 +184,8 @@ public:
         // Send finalization signal via command/reply register 2
         constexpr u16 FinalizeSignal = 0x8000;
         while (!teakra.SendDataIsEmpty(2))
-            teakra.Run(TeakraSlice);;
+            teakra.Run(TeakraSlice);
+        ;
 
         teakra.SendData(2, FinalizeSignal);
 
@@ -200,7 +195,7 @@ public:
 
         teakra.RecvData(2); // discard the value
 
-        //core_timing.UnscheduleEvent(teakra_slice_event, 0);
+        // core_timing.UnscheduleEvent(teakra_slice_event, 0);
     }
 
     u8* GetDspDataPointer(u32 baddr) {
@@ -262,8 +257,8 @@ public:
             u16 write_bbegin = pipe_status.write_bptr & PipeStatus::PtrMask;
             assert(write_bend > write_bbegin);
             u16 write_bsize = std::min<u16>(bsize, write_bend - write_bbegin);
-            std::memcpy(GetInterpDspDataPointer(pipe_status.waddress * 2 + write_bbegin), buffer_ptr,
-                        write_bsize);
+            std::memcpy(GetInterpDspDataPointer(pipe_status.waddress * 2 + write_bbegin),
+                        buffer_ptr, write_bsize);
             std::memcpy(GetDspDataPointer(pipe_status.waddress * 2 + write_bbegin), buffer_ptr,
                         write_bsize);
             buffer_ptr += write_bsize;

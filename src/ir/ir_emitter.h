@@ -1,13 +1,14 @@
 #pragma once
 
-#include "ir/opcode.h"
 #include "ir/basic_block.h"
+#include "ir/opcode.h"
 
 namespace Teakra::IR {
 
 class IREmitter {
 public:
-    explicit IREmitter(Block& block_, LocationDescriptor descriptor) : block(block_), current_location(descriptor) {}
+    explicit IREmitter(Block& block_, LocationDescriptor descriptor)
+        : block(block_), current_location(descriptor) {}
 
     u32 PC() const;
     U8 Imm8(u8 value) const;
@@ -43,7 +44,7 @@ public:
     void WriteMemory16(const U16& address, const U16& data);
 
 private:
-    template<typename T = Value, typename... Args>
+    template <typename T = Value, typename... Args>
     T Inst(Opcode op, Args... args) {
         auto iter = block.PrependNewInst(insertion_point, op, {Value(args)...});
         return T(Value(&*iter));

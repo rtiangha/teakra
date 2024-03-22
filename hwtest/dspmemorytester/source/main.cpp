@@ -10,7 +10,6 @@
 
 #include "cdc_bin.h"
 
-
 PrintConsole topScreen, bottomScreen;
 
 void MoveCursor(unsigned row, unsigned col) {
@@ -32,8 +31,6 @@ void SetColor(Color color, Color background) {
     printf("\x1b[%dm\x1b[%dm", (int)color, (int)background + 10);
 }
 
-
-
 void FlushCache(void* ptr, u32 size) {
     svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
@@ -41,7 +38,6 @@ void FlushCache(void* ptr, u32 size) {
 void InvalidateCache(void* ptr, u32 size) {
     svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)ptr, size);
 }
-
 
 vu16* dspP = (vu16*)0x1FF00000;
 vu16* dspD = (vu16*)0x1FF40000;
@@ -72,7 +68,6 @@ void PrintAll() {
         }
     }
 
-
     u32 addr = (u32)fcram_playground;
     if (addr < 0x1C000000) {
         addr = addr - 0x14000000 + 0x20000000;
@@ -95,7 +90,6 @@ void PrintAll() {
             printf(" ");
         }
     }
-
 
     consoleSelect(&bottomScreen);
 }
@@ -170,7 +164,7 @@ char buf[BUFLEN];
 void Fire() {
     dspD[0] = 1;
     FlushCache((void*)dspD, 8);
-    while(true) {
+    while (true) {
         InvalidateCache((void*)dspD, 8);
         if (dspD[0] == 0)
             break;

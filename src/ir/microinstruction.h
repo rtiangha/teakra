@@ -18,11 +18,14 @@ enum class Type;
  */
 class Inst final : public mcl::intrusive_list_node<Inst> {
     static constexpr size_t max_arg_count = 4;
+
 public:
     explicit Inst(Opcode op) : op(op) {}
 
     /// Get the microop this microinstruction represents.
-    Opcode GetOpcode() const { return op; }
+    Opcode GetOpcode() const {
+        return op;
+    }
     /// Get the number of arguments this instruction has.
     size_t NumArgs() const;
 
@@ -36,4 +39,4 @@ private:
     Inst* next_pseudoop = nullptr;
 };
 
-}  // namespace Dynarmic::IR
+} // namespace Teakra::IR

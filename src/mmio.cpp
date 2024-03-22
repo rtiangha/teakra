@@ -6,10 +6,10 @@
 #include "apbp.h"
 #include "btdmp.h"
 #include "dma.h"
+#include "jit_regs.h"
 #include "memory_interface.h"
 #include "mmio.h"
 #include "timer.h"
-#include "jit_regs.h"
 
 namespace Teakra {
 
@@ -250,19 +250,22 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
     impl->cells[0x10E].get = [&miu]() -> u16 { return miu.x_page; }; // MIU_XPAGE
     impl->cells[0x10E].set = [&miu, this](u16 value) {
         miu.x_page = value;
-        *miu.x_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.x_page * MemoryInterfaceUnit::DataMemoryBankSize;
+        *miu.x_offset = MemoryInterfaceUnit::DataMemoryOffset +
+                        miu.x_page * MemoryInterfaceUnit::DataMemoryBankSize;
     };
 
     impl->cells[0x110].get = [&miu]() -> u16 { return miu.y_page; }; // MIU_YPAGE
     impl->cells[0x110].set = [&miu, this](u16 value) {
         miu.y_page = value;
-        *miu.y_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.y_page * MemoryInterfaceUnit::DataMemoryBankSize;
+        *miu.y_offset = MemoryInterfaceUnit::DataMemoryOffset +
+                        miu.y_page * MemoryInterfaceUnit::DataMemoryBankSize;
     };
 
     impl->cells[0x112].get = [&miu]() -> u16 { return miu.z_page; }; // MIU_ZPAGE
     impl->cells[0x112].set = [&miu, this](u16 value) {
         miu.z_page = value;
-        *miu.z_offset = MemoryInterfaceUnit::DataMemoryOffset + miu.z_page * MemoryInterfaceUnit::DataMemoryBankSize;
+        *miu.z_offset = MemoryInterfaceUnit::DataMemoryOffset +
+                        miu.z_page * MemoryInterfaceUnit::DataMemoryBankSize;
     };
 
     impl->cells[0x114] = Cell::BitFieldCell({
@@ -365,7 +368,8 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
 
     // BTDMP
     for (u16 i = 0; i < 2; ++i) {
-        impl->cells[0x2A2 + i * 0x80].set = std::bind(&Btdmp::SetTransmitClockConfig, &btdmp[i], _1);
+        impl->cells[0x2A2 + i * 0x80].set =
+            std::bind(&Btdmp::SetTransmitClockConfig, &btdmp[i], _1);
         impl->cells[0x2A2 + i * 0x80].get = std::bind(&Btdmp::GetTransmitClockConfig, &btdmp[i]);
         impl->cells[0x2BE + i * 0x80].set = std::bind(&Btdmp::SetTransmitEnable, &btdmp[i], _1);
         impl->cells[0x2BE + i * 0x80].get = std::bind(&Btdmp::GetTransmitEnable, &btdmp[i]);

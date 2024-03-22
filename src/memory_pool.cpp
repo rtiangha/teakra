@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: 0BSD
  */
 
-#include "memory_pool.h"
 #include <cstdlib>
+#include "memory_pool.h"
 
 namespace Teakra::Common {
 
 Pool::Pool(size_t object_size, size_t initial_pool_size)
-        : object_size(object_size), slab_size(initial_pool_size) {
+    : object_size(object_size), slab_size(initial_pool_size) {
     AllocateNewSlab();
 }
 
@@ -40,4 +40,4 @@ void Pool::AllocateNewSlab() {
     remaining = slab_size;
 }
 
-}  // namespace Teakra::Common
+} // namespace Teakra::Common

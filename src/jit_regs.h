@@ -4,18 +4,18 @@
 #include <array>
 #include <memory>
 #include <vector>
-#include "crash.h"
+#include <xbyak/xbyak.h>
 #include "bit_field.h"
 #include "common_types.h"
+#include "crash.h"
 #include "memory_interface.h"
-#include <xbyak/xbyak.h>
 
 namespace Teakra {
 
 using namespace Xbyak::util;
-using Xbyak::Reg64;
-using Xbyak::Reg32;
 using Xbyak::Reg16;
+using Xbyak::Reg32;
+using Xbyak::Reg64;
 
 // The following is used to alias some commonly used registers.
 
@@ -33,22 +33,23 @@ constexpr Reg64 REGS = r15;
 /// Holds commonly used status flags
 constexpr Reg32 FLAGS = edi;
 
-// Most frequently accessed status registers, or registers with no cross refrences are stored directly by the JIT for speed
-// These registers are also used in a static manner as it greatly reduces the amount of emitted assembly per block.
+// Most frequently accessed status registers, or registers with no cross refrences are stored
+// directly by the JIT for speed These registers are also used in a static manner as it greatly
+// reduces the amount of emitted assembly per block.
 
 // This doesn't represent an actual register but the current status flags of the JIT
 union Flags {
     u16 raw;
     BitField<0, 1, u16> fr;
-    BitField<1, 1, u16> flm; // set on saturation
-    BitField<2, 1, u16> fvl; // Rn zero flag
-    BitField<3, 1, u16> fe; // extension flag
-    BitField<4, 1, u16> fc0; // carry flag
-    BitField<5, 1, u16> fv; // overflow flag
-    BitField<6, 1, u16> fn; // normalized flag
-    BitField<7, 1, u16> fm; // negative flag
-    BitField<8, 1, u16> fz; // zero flag
-    BitField<12, 1, u16> fc1; // another carry flag
+    BitField<1, 1, u16> flm;       // set on saturation
+    BitField<2, 1, u16> fvl;       // Rn zero flag
+    BitField<3, 1, u16> fe;        // extension flag
+    BitField<4, 1, u16> fc0;       // carry flag
+    BitField<5, 1, u16> fv;        // overflow flag
+    BitField<6, 1, u16> fn;        // normalized flag
+    BitField<7, 1, u16> fm;        // negative flag
+    BitField<8, 1, u16> fz;        // zero flag
+    BitField<12, 1, u16> fc1;      // another carry flag
     BitField<0, 9, u16> st0_flags; // flags to clear when being set from st0
 };
 
@@ -70,8 +71,8 @@ union ArU {
     BitField<13, 3, u16> arrn0;
 
     static u16 Mask() {
-        return decltype(arstep1)::mask | decltype(aroffset1)::mask | decltype(arstep0)::mask
-             | decltype(aroffset0)::mask | decltype(arrn1)::mask | decltype(arrn0)::mask;
+        return decltype(arstep1)::mask | decltype(aroffset1)::mask | decltype(arstep0)::mask |
+               decltype(aroffset0)::mask | decltype(arrn1)::mask | decltype(arrn0)::mask;
     }
 };
 
@@ -85,8 +86,8 @@ union ArpU {
     BitField<13, 2, u16> arprnj;
 
     static u16 Mask() {
-        return decltype(arpstepi)::mask | decltype(arpoffseti)::mask | decltype(arpstepj)::mask
-               | decltype(arpoffsetj)::mask | decltype(arprni)::mask | decltype(arprnj)::mask;
+        return decltype(arpstepi)::mask | decltype(arpoffseti)::mask | decltype(arpstepj)::mask |
+               decltype(arpoffsetj)::mask | decltype(arprni)::mask | decltype(arprnj)::mask;
     }
 };
 
@@ -97,19 +98,20 @@ union Mod0 {
     }
 
     u16 raw{0};
-    BitField<0, 1, u16> sat; // 1-bit, disable saturation when moving from acc
-    BitField<1, 1, u16> sata; // 1-bit, disable saturation when moving to acc
+    BitField<0, 1, u16> sat;            // 1-bit, disable saturation when moving from acc
+    BitField<1, 1, u16> sata;           // 1-bit, disable saturation when moving to acc
     BitField<2, 3, u16> mod0_unk_const; // = 1, read only
-    BitField<5, 2, u16> hwm; // 2-bit, half word mode, modify y on multiplication
-    BitField<7, 1, u16> s; // 1-bit, shift mode. 0 - arithmetic, 1 - logic
-    BitField<8, 1, u16> ou0; // user output pins (always zero in firmware?)
+    BitField<5, 2, u16> hwm;            // 2-bit, half word mode, modify y on multiplication
+    BitField<7, 1, u16> s;              // 1-bit, shift mode. 0 - arithmetic, 1 - logic
+    BitField<8, 1, u16> ou0;            // user output pins (always zero in firmware?)
     BitField<9, 1, u16> ou1;
     BitField<10, 2, u16> ps0; // 2-bit, product shift mode
     BitField<13, 2, u16> ps1;
 
     static u16 Mask() {
-        return decltype(sat)::mask | decltype(sata)::mask | decltype(mod0_unk_const)::mask
-               | decltype(hwm)::mask | decltype(s)::mask | decltype(ou0)::mask | decltype(ou1)::mask | decltype(ps0)::mask | decltype(ps1)::mask;
+        return decltype(sat)::mask | decltype(sata)::mask | decltype(mod0_unk_const)::mask |
+               decltype(hwm)::mask | decltype(s)::mask | decltype(ou0)::mask | decltype(ou1)::mask |
+               decltype(ps0)::mask | decltype(ps1)::mask;
     }
 };
 
@@ -119,16 +121,16 @@ union Mod1 {
     }
 
     u16 raw{0};
-    BitField<0, 8, u16> page; // 8-bit, higher part of MemImm8 address
-    BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in banke, and use
-                                // stepi0/j0 for steping
+    BitField<0, 8, u16> page;   // 8-bit, higher part of MemImm8 address
+    BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in
+                                // banke, and use stepi0/j0 for steping
     BitField<13, 1, u16> cmd; // 1-bit, step/mod method. 0 - Teak; 1 - TeakLite
     BitField<14, 1, u16> epi; // 1-bit. If set, cause r3 = 0 when steping r3
     BitField<15, 1, u16> epj; // 1-bit. If set, cause r7 = 0 when steping r7
 
     static u16 Mask() {
-        return decltype(page)::mask | decltype(stp16)::mask | decltype(cmd)::mask
-               | decltype(epi)::mask | decltype(epj)::mask;
+        return decltype(page)::mask | decltype(stp16)::mask | decltype(cmd)::mask |
+               decltype(epi)::mask | decltype(epj)::mask;
     }
 };
 
@@ -181,10 +183,8 @@ union Mod3 {
     BitField<15, 1, u16> crep;
 
     u64 IcQword() const {
-        return nimc.Value()
-        | (static_cast<u64>(ic0.Value()) << 16)
-        | (static_cast<u64>(ic1.Value()) << 32)
-        | (static_cast<u64>(ic2.Value()) << 48);
+        return nimc.Value() | (static_cast<u64>(ic0.Value()) << 16) |
+               (static_cast<u64>(ic1.Value()) << 32) | (static_cast<u64>(ic2.Value()) << 48);
     }
 
     u32 OuDword() const {
@@ -192,42 +192,37 @@ union Mod3 {
     }
 
     u64 OuIeQword() const {
-        return ou2.Value()
-        | (static_cast<u64>(ou3.Value()) << 16)
-        | (static_cast<u64>(ou4.Value()) << 32)
-        | (static_cast<u64>(ie.Value()) << 48);
+        return ou2.Value() | (static_cast<u64>(ou3.Value()) << 16) |
+               (static_cast<u64>(ou4.Value()) << 32) | (static_cast<u64>(ie.Value()) << 48);
     }
 
     u64 ImQword() const {
-        return im0.Value()
-        | (static_cast<u64>(im1.Value()) << 16)
-        | (static_cast<u64>(im2.Value()) << 32)
-        | (static_cast<u64>(imv.Value()) << 48);
+        return im0.Value() | (static_cast<u64>(im1.Value()) << 16) |
+               (static_cast<u64>(im2.Value()) << 32) | (static_cast<u64>(imv.Value()) << 48);
     }
 
     u64 CQword() const {
-        return ccnta.Value()
-        | (static_cast<u64>(cpc.Value()) << 16)
-        | (static_cast<u64>(crep.Value()) << 32);
+        return ccnta.Value() | (static_cast<u64>(cpc.Value()) << 16) |
+               (static_cast<u64>(crep.Value()) << 32);
     }
 };
 
 union Stt0 {
-    BitField<0, 1, u16> flm; // set on saturation
-    BitField<1, 1, u16> fvl; // Rn zero flag
-    BitField<2, 1, u16> fe; // extension flag
-    BitField<3, 1, u16> fc0; // carry flag
-    BitField<4, 1, u16> fv; // overflow flag
-    BitField<5, 1, u16> fn; // normalized flag
-    BitField<6, 1, u16> fm; // negative flag
-    BitField<7, 1, u16> fz; // zero flag
+    BitField<0, 1, u16> flm;  // set on saturation
+    BitField<1, 1, u16> fvl;  // Rn zero flag
+    BitField<2, 1, u16> fe;   // extension flag
+    BitField<3, 1, u16> fc0;  // carry flag
+    BitField<4, 1, u16> fv;   // overflow flag
+    BitField<5, 1, u16> fn;   // normalized flag
+    BitField<6, 1, u16> fm;   // negative flag
+    BitField<7, 1, u16> fz;   // zero flag
     BitField<11, 1, u16> fc1; // another carry flag
     BitField<2, 6, u16> st0_flags;
 
     static u16 Mask() {
-        return decltype(flm)::mask | decltype(fvl)::mask | decltype(fe)::mask
-               | decltype(fc0)::mask | decltype(fv)::mask | decltype(fn)::mask
-               | decltype(fm)::mask | decltype(fz)::mask | decltype(fc1)::mask;
+        return decltype(flm)::mask | decltype(fvl)::mask | decltype(fe)::mask |
+               decltype(fc0)::mask | decltype(fv)::mask | decltype(fn)::mask | decltype(fm)::mask |
+               decltype(fz)::mask | decltype(fc1)::mask;
     }
 };
 
@@ -269,7 +264,8 @@ union St0 {
     BitField<6, 6, u16> flags_upper;
 
     u16 ToHostMask() const {
-        return fr.Value() | (flm_fvl.Value() << 1) | (flm_fvl.Value() << 2) | (flags_upper.Value() << 3);
+        return fr.Value() | (flm_fvl.Value() << 1) | (flm_fvl.Value() << 2) |
+               (flags_upper.Value() << 3);
     }
 
     u32 Im0Im1Mask() const {
@@ -304,7 +300,8 @@ union St2 {
     BitField<0, 6, u16> m1_5;
 
     u64 IpMask() const {
-        return ip0.Value() | (static_cast<u64>(ip1.Value()) << 16) | (static_cast<u64>(ip2.Value()) << 32);
+        return ip0.Value() | (static_cast<u64>(ip1.Value()) << 16) |
+               (static_cast<u64>(ip2.Value()) << 32);
     }
 };
 
@@ -345,7 +342,7 @@ struct JitRegisters {
 
     /** Program control unit **/
 
-    u32 pc = 0;     // 18-bit, program counter
+    u32 pc = 0; // 18-bit, program counter
     u32 idle = 0;
     u16 pad0{};
     u16 prpage = 0; // 4-bit, program page
@@ -369,9 +366,11 @@ struct JitRegisters {
         c.movzx(rsi, word[REGS + offsetof(JitRegisters, bcn)]);
         c.sub(rsi, 1);
         c.lea(rsi, ptr[rsi + rsi * 2]);
-        c.mov(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
+        c.mov(out,
+              word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)]);
         c.test(word[REGS + offsetof(JitRegisters, lp)], 0x1);
-        c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) + rsi * 4]);
+        c.cmovnz(out, word[REGS + offsetof(JitRegisters, bkrep_stack) +
+                           offsetof(BlockRepeatFrame, lc) + rsi * 4]);
     }
 
     void SetLc(Xbyak::CodeGenerator& c, Reg64 value) {
@@ -381,10 +380,13 @@ struct JitRegisters {
         c.movzx(rsi, word[REGS + offsetof(JitRegisters, bcn)]);
         c.sub(rsi, 1);
         c.lea(rsi, ptr[rsi + rsi * 2]);
-        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) + rsi * 4], value.cvt16());
+        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc) +
+                   rsi * 4],
+              value.cvt16());
         c.jmp(end_label);
         c.L(not_in_loop);
-        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)], value.cvt16());
+        c.mov(word[REGS + offsetof(JitRegisters, bkrep_stack) + offsetof(BlockRepeatFrame, lc)],
+              value.cvt16());
         c.L(end_label);
     }
 
@@ -397,8 +399,8 @@ struct JitRegisters {
 
     u64 a1s = 0, b1s = 0; // shadows for a1 and b1
     u16 ccnta = 1;        // 1-bit. If clear, store/restore a1/b1 to shadows on context switch
-    u16 cpc = 1;    // 1-bit, change word order when push/pop pc
-    u16 crep = 1;     // 1-bit. If clear, store/restore repc to shadows on context switch
+    u16 cpc = 1;          // 1-bit, change word order when push/pop pc
+    u16 crep = 1;         // 1-bit. If clear, store/restore repc to shadows on context switch
     u16 pad = 0;
 
     ///< Swap register list
@@ -410,9 +412,9 @@ struct JitRegisters {
     u16 imv = 0;
     ///< Swap register list end
 
-    u16 sv = 0;   // 16-bit two's complement shift value
+    u16 sv = 0; // 16-bit two's complement shift value
 
-    Flags flags{};  // Not a register, but used to store host flags register.
+    Flags flags{}; // Not a register, but used to store host flags register.
     u16 pad7 = 0;
 
     // Shadows
@@ -505,8 +507,9 @@ struct JitRegisters {
     }
 
     void ShadowSwap(Xbyak::CodeGenerator& c) {
-        //shadow_swap_registers.Swap(this);
-        static_assert(offsetof(JitRegisters, imv) + sizeof(imv) - offsetof(JitRegisters, pcmhi) == sizeof(u64) * 2);
+        // shadow_swap_registers.Swap(this);
+        static_assert(offsetof(JitRegisters, imv) + sizeof(imv) - offsetof(JitRegisters, pcmhi) ==
+                      sizeof(u64) * 2);
         c.movdqu(xmm0, xword[REGS + offsetof(JitRegisters, pcmhi)]);
         c.movdqu(xmm1, xword[REGS + offsetof(JitRegisters, pcmhib)]);
         c.movdqu(xword[REGS + offsetof(JitRegisters, pcmhi)], xmm1);
@@ -583,8 +586,8 @@ struct JitRegisters {
     template <typename T>
     void SetStt1(Xbyak::CodeGenerator& c, T value) {
         if constexpr (std::is_base_of_v<Xbyak::Reg, T>) {
-            c.and_(value, decltype(Stt1::fr)::mask | decltype(Stt1::pe0)::mask
-                              | decltype(Stt1::pe1)::mask); // mask out read only bits
+            c.and_(value, decltype(Stt1::fr)::mask | decltype(Stt1::pe0)::mask |
+                              decltype(Stt1::pe1)::mask); // mask out read only bits
             c.shr(value, decltype(Stt1::fr)::position);
             c.and_(FLAGS, ~decltype(Flags::fr)::mask); // clear fr
             c.or_(FLAGS.cvt8(), value.cvt8());
@@ -802,7 +805,8 @@ struct JitRegisters {
 
             // Update im, ou. iu and ip are read only
             c.mov(word[REGS + offsetof(JitRegisters, im) + sizeof(u16) * 2], reg.im2.Value());
-            c.mov(dword[REGS + offsetof(JitRegisters, ou)], reg.ou0.Value() | (static_cast<u32>(reg.ou1.Value()) << 16));
+            c.mov(dword[REGS + offsetof(JitRegisters, ou)],
+                  reg.ou0.Value() | (static_cast<u32>(reg.ou1.Value()) << 16));
         }
     }
 

@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,15 +63,12 @@ void Teakra_AHBMWrite16(TeakraContext* context, uint32_t addr, uint16_t value);
 uint16_t Teakra_AHBMRead32(TeakraContext* context, uint32_t addr);
 void Teakra_AHBMWrite32(TeakraContext* context, uint32_t addr, uint32_t value);
 
-
 void Teakra_Run(TeakraContext* context, unsigned cycle);
 
-void Teakra_SetAHBMCallback(TeakraContext* context,
-                            Teakra_AHBMReadCallback8  read8 , Teakra_AHBMWriteCallback8  write8 ,
-                            Teakra_AHBMReadCallback16 read16, Teakra_AHBMWriteCallback16 write16,
-                            Teakra_AHBMReadCallback32 read32, Teakra_AHBMWriteCallback32 write32,
-                            void* userdata);
-
+void Teakra_SetAHBMCallback(TeakraContext* context, Teakra_AHBMReadCallback8 read8,
+                            Teakra_AHBMWriteCallback8 write8, Teakra_AHBMReadCallback16 read16,
+                            Teakra_AHBMWriteCallback16 write16, Teakra_AHBMReadCallback32 read32,
+                            Teakra_AHBMWriteCallback32 write32, void* userdata);
 
 void Teakra_SetAudioCallback(TeakraContext* context, Teakra_AudioCallback callback, void* userdata);
 #ifdef __cplusplus

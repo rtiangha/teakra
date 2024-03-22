@@ -10,7 +10,7 @@
 
 /// Textually concatenates two tokens. The double-expansion is required by the C preprocessor.
 #define CONCAT2(x, y) DO_CONCAT2(x, y)
-#define DO_CONCAT2(x, y) x ## y
+#define DO_CONCAT2(x, y) x##y
 
 // helper macro to properly align structure members.
 // Calling INSERT_PADDING_BYTES will add a new member variable with a name like "pad121",
@@ -40,7 +40,8 @@
 #else
 inline u32 rotl(u32 x, int shift) {
     shift &= 31;
-    if (!shift) return x;
+    if (!shift)
+        return x;
     return (x << shift) | (x >> (32 - shift));
 }
 #endif
@@ -50,17 +51,18 @@ inline u32 rotl(u32 x, int shift) {
 #else
 inline u32 rotr(u32 x, int shift) {
     shift &= 31;
-    if (!shift) return x;
+    if (!shift)
+        return x;
     return (x >> shift) | (x << (32 - shift));
 }
 #endif
 
-inline u64 _rotl64(u64 x, unsigned int shift){
+inline u64 _rotl64(u64 x, unsigned int shift) {
     unsigned int n = shift % 64;
     return (x << n) | (x >> (64 - n));
 }
 
-inline u64 _rotr64(u64 x, unsigned int shift){
+inline u64 _rotr64(u64 x, unsigned int shift) {
     unsigned int n = shift % 64;
     return (x >> n) | (x << (64 - n));
 }

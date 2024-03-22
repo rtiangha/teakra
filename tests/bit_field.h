@@ -1,7 +1,6 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-
 // Copyright 2014 Tony Wasserka
 // All rights reserved.
 //
@@ -29,15 +28,14 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 #pragma once
 
 #include <cstddef>
 #include <limits>
 #include <type_traits>
 
-#include "common_funcs.h"
 #include "../src/swap.h"
+#include "common_funcs.h"
 
 /*
  * Abstract bitfield class
@@ -112,9 +110,8 @@
  * symptoms.
  */
 #pragma pack(1)
-template<std::size_t position, std::size_t bits, typename T>
-struct BitField
-{
+template <std::size_t position, std::size_t bits, typename T>
+struct BitField {
 private:
     // We hide the copy assigment operator here, because the default copy
     // assignment would copy the full storage value, rather than just the bits
@@ -144,18 +141,15 @@ public:
     }
 
     FORCE_INLINE T Value() const volatile {
-        if (std::numeric_limits<T>::is_signed)
-        {
-            std::size_t shift = 8 * sizeof(T)-bits;
+        if (std::numeric_limits<T>::is_signed) {
+            std::size_t shift = 8 * sizeof(T) - bits;
             return (T)((storage << (shift - position)) >> shift);
-        }
-        else
-        {
+        } else {
             return (T)((storage & GetMask()) >> position);
         }
     }
 
-           // TODO: we may want to change this to explicit operator bool() if it's bug-free in VS2015
+    // TODO: we may want to change this to explicit operator bool() if it's bug-free in VS2015
     FORCE_INLINE bool ToBool() const volatile {
         return Value() != 0;
     }
@@ -165,15 +159,14 @@ private:
     // T is an enumeration. Note that T is wrapped within an enable_if in the
     // former case to workaround compile errors which arise when using
     // std::underlying_type<T>::type directly.
-    typedef typename std::conditional < std::is_enum<T>::value,
-                                      std::underlying_type<T>,
-                                      std::enable_if < true, T >> ::type::type StorageType;
+    typedef typename std::conditional<std::is_enum<T>::value, std::underlying_type<T>,
+                                      std::enable_if<true, T>>::type::type StorageType;
 
     // Unsigned version of StorageType
     typedef typename std::make_unsigned<StorageType>::type StorageTypeU;
 
     FORCE_INLINE StorageType GetMask() const volatile {
-        return (((StorageTypeU)~0) >> (8 * sizeof(T)-bits)) << position;
+        return (((StorageTypeU)~0) >> (8 * sizeof(T) - bits)) << position;
     }
 
     StorageType storage;
@@ -189,5 +182,6 @@ private:
 #pragma pack()
 
 #if (__GNUC__ >= 5) || defined(__clang__) || defined(_MSC_VER)
-static_assert(std::is_trivially_copyable<BitField<0, 1, u32>>::value, "BitField must be trivially copyable");
+static_assert(std::is_trivially_copyable<BitField<0, 1, u32>>::value,
+              "BitField must be trivially copyable");
 #endif

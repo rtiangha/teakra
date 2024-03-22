@@ -7,7 +7,6 @@
 #include "bit_field.h"
 #include "common_types.h"
 #include "crash.h"
-#include "crash.h"
 #include "operand.h"
 
 namespace Teakra {

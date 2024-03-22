@@ -8,17 +8,17 @@
 #include <type_traits>
 
 #include "../src/bit_field.h"
-#include "common_funcs.h"
-#include "audio_types.h"
 #include "../src/common_types.h"
 #include "../src/swap.h"
+#include "audio_types.h"
+#include "common_funcs.h"
 
 using VAddr = u32;
 
 namespace AudioCore {
 constexpr size_t num_sources = 24;
 constexpr size_t samples_per_frame = 160;
-}
+} // namespace AudioCore
 
 namespace DSP {
 namespace HLE {
@@ -30,8 +30,8 @@ namespace HLE {
 // Second Region: 0x1FF70000 (Size: 0x8000)
 //
 // The DSP reads from each region alternately based on the frame counter for each region much like a
-// double-buffer. The frame counter is located as the very last u16 of each region and is incremented
-// each audio tick.
+// double-buffer. The frame counter is located as the very last u16 of each region and is
+// incremented each audio tick.
 
 constexpr u32 ToDspAddr(VAddr addr) {
     return (addr - (DSP_RAM_VADDR + 0x40000)) >> 1;
@@ -69,6 +69,7 @@ struct u32_dsp {
     void operator=(u32 new_value) volatile {
         storage = Convert(new_value);
     }
+
 private:
     static constexpr u32 Convert(u32 value) {
         return (value << 16) | (value >> 16);
@@ -102,13 +103,13 @@ static_assert(std::is_trivially_copyable<u32_dsp>::value, "u32_dsp isn't trivial
 // #: This refers to the order in which they appear in the DspPipe::Audio DSP pipe.
 //    See also: DSP::HLE::PipeRead.
 //
-// Note that the above addresses do vary slightly between audio firmwares observed; the addresses are
-// not fixed in stone. The addresses above are only an examplar; they're what this implementation
-// does and provides to applications.
+// Note that the above addresses do vary slightly between audio firmwares observed; the addresses
+// are not fixed in stone. The addresses above are only an examplar; they're what this
+// implementation does and provides to applications.
 //
-// Application requests the DSP service to convert DSP addresses into ARM11 virtual addresses using the
-// ConvertProcessAddressFromDspDram service call. Applications seem to derive the addresses for the
-// second region via:
+// Application requests the DSP service to convert DSP addresses into ARM11 virtual addresses using
+// the ConvertProcessAddressFromDspDram service call. Applications seem to derive the addresses for
+// the second region via:
 //     second_region_dsp_addr = first_region_dsp_addr | 0x10000
 //
 // Applications maintain most of its own audio state, the memory region is used mainly for
@@ -123,17 +124,20 @@ static_assert(std::is_trivially_copyable<u32_dsp>::value, "u32_dsp isn't trivial
 // GCC versions < 5.0 do not implement std::is_trivially_copyable.
 // Excluding MSVC because it has weird behaviour for std::is_trivially_copyable.
 #if (__GNUC__ >= 5) || defined(__clang__)
-#define ASSERT_DSP_STRUCT(name, size) \
-static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doesn't use standard layout"); \
-    static_assert(std::is_trivially_copyable<name>::value, "DSP structure " #name " isn't trivially copyable"); \
+#define ASSERT_DSP_STRUCT(name, size)                                                              \
+    static_assert(std::is_standard_layout<name>::value,                                            \
+                  "DSP structure " #name " doesn't use standard layout");                          \
+    static_assert(std::is_trivially_copyable<name>::value,                                         \
+                  "DSP structure " #name " isn't trivially copyable");                             \
     static_assert(sizeof(name) == (size), "Unexpected struct size for DSP structure " #name)
 #else
-#define ASSERT_DSP_STRUCT(name, size) \
-static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doesn't use standard layout"); \
+#define ASSERT_DSP_STRUCT(name, size)                                                              \
+    static_assert(std::is_standard_layout<name>::value,                                            \
+                  "DSP structure " #name " doesn't use standard layout");                          \
     static_assert(sizeof(name) == (size), "Unexpected struct size for DSP structure " #name)
 #endif
 
-    struct SourceConfiguration {
+struct SourceConfiguration {
     struct Configuration {
         /// These dirty flags are set by the application when it updates the fields in this struct.
         /// The DSP clears these each audio frame.
@@ -163,7 +167,7 @@ static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doe
             BitField<30, 1, u32_le> embedded_buffer_dirty;
         };
 
-               // Gain control
+        // Gain control
 
         /**
          * Gain is between 0.0-1.0. This determines how much will this source appear on
@@ -172,21 +176,17 @@ static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doe
          */
         float_le gain[3][4];
 
-               // Interpolation
+        // Interpolation
 
-               /// Multiplier for sample rate. Resampling occurs with the selected interpolation method.
+        /// Multiplier for sample rate. Resampling occurs with the selected interpolation method.
         float_le rate_multiplier;
 
-        enum class InterpolationMode : u8 {
-            Polyphase = 0,
-            Linear = 1,
-            None = 2
-        };
+        enum class InterpolationMode : u8 { Polyphase = 0, Linear = 1, None = 2 };
 
         InterpolationMode interpolation_mode;
         u8 interpolation_related; ///< Interpolation related
 
-               // Filters
+        // Filters
 
         /**
          * This is the simplest normalized first-order digital recursive filter.
@@ -203,9 +203,9 @@ static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doe
          * This is a normalised biquad filter (second-order).
          * The transfer function of this filter is:
          *     H(z) = (b0 + b1 z^-1 + b2 z^-2) / (1 - a1 z^-1 - a2 z^-2)
-         * Nintendo chose to negate the feedbackward coefficients. This differs from standard notation
-         * as in: https://ccrma.stanford.edu/~jos/filters/Direct_Form_I.html
-         * Values are signed fixed point with 14 fractional bits.
+         * Nintendo chose to negate the feedbackward coefficients. This differs from standard
+         * notation as in: https://ccrma.stanford.edu/~jos/filters/Direct_Form_I.html Values are
+         * signed fixed point with 14 fractional bits.
          */
         struct BiquadFilter {
             s16_le a2;
@@ -224,72 +224,66 @@ static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doe
         SimpleFilter simple_filter;
         BiquadFilter biquad_filter;
 
-               // Buffer Queue
+        // Buffer Queue
 
-               /// A buffer of audio data from the application, along with metadata about it.
+        /// A buffer of audio data from the application, along with metadata about it.
         struct Buffer {
             /// Physical memory address of the start of the buffer
             u32_dsp physical_address;
 
-                   /// This is length in terms of samples.
-                   /// Note that in different buffer formats a sample takes up different number of bytes.
+            /// This is length in terms of samples.
+            /// Note that in different buffer formats a sample takes up different number of bytes.
             u32_dsp length;
 
-                   /// ADPCM Predictor (4 bits) and Scale (4 bits)
+            /// ADPCM Predictor (4 bits) and Scale (4 bits)
             union {
                 u16_le adpcm_ps;
                 BitField<0, 4, u16_le> adpcm_scale;
                 BitField<4, 4, u16_le> adpcm_predictor;
             };
 
-                   /// ADPCM Historical Samples (y[n-1] and y[n-2])
+            /// ADPCM Historical Samples (y[n-1] and y[n-2])
             u16_le adpcm_yn[2];
 
-                   /// This is non-zero when the ADPCM values above are to be updated.
+            /// This is non-zero when the ADPCM values above are to be updated.
             u8 adpcm_dirty;
 
-                   /// Is a looping buffer.
+            /// Is a looping buffer.
             u8 is_looping;
 
-                   /// This value is shown in SourceStatus::current_buffer_id when this buffer has finished.
-                   /// This allows the emulated application to tell what buffer is currently playing
+            /// This value is shown in SourceStatus::current_buffer_id when this buffer has
+            /// finished. This allows the emulated application to tell what buffer is currently
+            /// playing
             u16_le buffer_id;
 
             INSERT_PADDING_DSPWORDS(1);
         };
 
-        u16_le buffers_dirty;             ///< Bitmap indicating which buffers are dirty (bit i -> buffers[i])
-        Buffer buffers[4];                ///< Queued Buffers
+        u16_le buffers_dirty; ///< Bitmap indicating which buffers are dirty (bit i -> buffers[i])
+        Buffer buffers[4];    ///< Queued Buffers
 
-               // Playback controls
+        // Playback controls
 
         u32_dsp loop_related;
         u8 enable;
         INSERT_PADDING_BYTES(1);
-        u16_le sync;                      ///< Application-side sync (See also: SourceStatus::sync)
-        u32_dsp play_position;            ///< Position. (Units: number of samples)
+        u16_le sync;           ///< Application-side sync (See also: SourceStatus::sync)
+        u32_dsp play_position; ///< Position. (Units: number of samples)
         INSERT_PADDING_DSPWORDS(2);
 
-               // Embedded Buffer
-               // This buffer is often the first buffer to be used when initiating audio playback,
-               // after which the buffer queue is used.
+        // Embedded Buffer
+        // This buffer is often the first buffer to be used when initiating audio playback,
+        // after which the buffer queue is used.
 
         u32_dsp physical_address;
 
-               /// This is length in terms of samples.
-               /// Note a sample takes up different number of bytes in different buffer formats.
+        /// This is length in terms of samples.
+        /// Note a sample takes up different number of bytes in different buffer formats.
         u32_dsp length;
 
-        enum class MonoOrStereo : u16_le {
-            Mono = 1,
-            Stereo = 2
-        };
+        enum class MonoOrStereo : u16_le { Mono = 1, Stereo = 2 };
 
-        enum class Format : u16_le {
-            PCM8 = 0,
-            PCM16 = 1,
-            ADPCM = 2
-        };
+        enum class Format : u16_le { PCM8 = 0, PCM16 = 1, ADPCM = 2 };
 
         union {
             u16_le flags1_raw;
@@ -298,23 +292,24 @@ static_assert(std::is_standard_layout<name>::value, "DSP structure " #name " doe
             BitField<5, 1, u16_le> fade_in;
         };
 
-               /// ADPCM Predictor (4 bit) and Scale (4 bit)
+        /// ADPCM Predictor (4 bit) and Scale (4 bit)
         union {
             u16_le adpcm_ps;
             BitField<0, 4, u16_le> adpcm_scale;
             BitField<4, 4, u16_le> adpcm_predictor;
         };
 
-               /// ADPCM Historical Samples (y[n-1] and y[n-2])
+        /// ADPCM Historical Samples (y[n-1] and y[n-2])
         u16_le adpcm_yn[2];
 
         union {
             u16_le flags2_raw;
             BitField<0, 1, u16_le> adpcm_dirty; ///< Has the ADPCM info above been changed?
-            BitField<1, 1, u16_le> is_looping; ///< Is this a looping buffer?
+            BitField<1, 1, u16_le> is_looping;  ///< Is this a looping buffer?
         };
 
-               /// Buffer id of embedded buffer (used as a buffer id in SourceStatus to reference this buffer).
+        /// Buffer id of embedded buffer (used as a buffer id in SourceStatus to reference this
+        /// buffer).
         u16_le buffer_id;
     };
 
@@ -325,11 +320,11 @@ ASSERT_DSP_STRUCT(SourceConfiguration::Configuration::Buffer, 20);
 
 struct SourceStatus {
     struct Status {
-        u8 is_enabled;               ///< Is this channel enabled? (Doesn't have to be playing anything.)
-        u8 current_buffer_id_dirty;  ///< Non-zero when current_buffer_id changes
-        u16_le sync;                 ///< Is set by the DSP to the value of SourceConfiguration::sync
-        u32_dsp buffer_position;     ///< Number of samples into the current buffer
-        u16_le current_buffer_id;    ///< Updated when a buffer finishes playing
+        u8 is_enabled; ///< Is this channel enabled? (Doesn't have to be playing anything.)
+        u8 current_buffer_id_dirty; ///< Non-zero when current_buffer_id changes
+        u16_le sync;                ///< Is set by the DSP to the value of SourceConfiguration::sync
+        u32_dsp buffer_position;    ///< Number of samples into the current buffer
+        u16_le current_buffer_id;   ///< Updated when a buffer finishes playing
         INSERT_PADDING_DSPWORDS(1);
     };
 
@@ -371,17 +366,14 @@ struct DspConfiguration {
         BitField<31, 1, u32_le> unknown18_dirty;
     };
 
-           /// The DSP has three intermediate audio mixers. This controls the volume level (0.0-1.0) for each at the final mixer
+    /// The DSP has three intermediate audio mixers. This controls the volume level (0.0-1.0) for
+    /// each at the final mixer
     float_le volume[3];
 
     u16 unknown17;
     INSERT_PADDING_DSPWORDS(2);
 
-    enum class OutputFormat : u16_le {
-        Mono = 0,
-        Stereo = 1,
-        Surround = 2
-    };
+    enum class OutputFormat : u16_le { Mono = 0, Stereo = 1, Surround = 2 };
 
     OutputFormat output_format;
 
@@ -417,10 +409,11 @@ struct DspConfiguration {
         u16_le enable;
         INSERT_PADDING_DSPWORDS(1);
         u16_le outputs;
-        u32_dsp work_buffer_address; ///< The application allocates a block of memory for the DSP to use as a work buffer.
-        u16_le frame_count;  ///< Frames to delay by
+        u32_dsp work_buffer_address; ///< The application allocates a block of memory for the DSP to
+                                     ///< use as a work buffer.
+        u16_le frame_count;          ///< Frames to delay by
 
-               // Coefficients
+        // Coefficients
         s16_le g; ///< Fixed point with 7 fractional bits
         s16_le a; ///< Fixed point with 7 fractional bits
         s16_le b; ///< Fixed point with 7 fractional bits
@@ -467,7 +460,8 @@ ASSERT_DSP_STRUCT(FinalMixSamples, 640);
 /// Values that exceed s16 range will be clipped by the DSP after further processing.
 struct IntermediateMixSamples {
     struct Samples {
-        s32_le pcm32[4][AudioCore::samples_per_frame]; ///< Little-endian as opposed to DSP middle-endian.
+        s32_le pcm32[4][AudioCore::samples_per_frame]; ///< Little-endian as opposed to DSP
+                                                       ///< middle-endian.
     };
 
     Samples mix1;
@@ -535,21 +529,36 @@ struct SharedMemory {
 ASSERT_DSP_STRUCT(SharedMemory, 0x8000);
 
 // Structures must have an offset that is a multiple of two.
-static_assert(offsetof(SharedMemory, frame_counter) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, source_configurations) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, source_statuses) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, adpcm_coefficients) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, dsp_configuration) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, dsp_status) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, final_samples) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, intermediate_mix_samples) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, compressor) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, dsp_debug) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, unknown10) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, unknown11) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, unknown12) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, unknown13) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
-static_assert(offsetof(SharedMemory, unknown14) % 2 == 0, "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, frame_counter) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, source_configurations) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, source_statuses) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, adpcm_coefficients) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, dsp_configuration) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, dsp_status) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, final_samples) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, intermediate_mix_samples) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, compressor) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, dsp_debug) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, unknown10) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, unknown11) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, unknown12) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, unknown13) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
+static_assert(offsetof(SharedMemory, unknown14) % 2 == 0,
+              "Structures in DSP::HLE::SharedMemory must be 2-byte aligned");
 
 #undef INSERT_PADDING_DSPWORDS
 #undef ASSERT_DSP_STRUCT
@@ -567,7 +576,8 @@ void Shutdown();
  */
 bool Tick();
 
-/// Returns a mutable reference to the current region. Current region is selected based on the frame counter.
+/// Returns a mutable reference to the current region. Current region is selected based on the frame
+/// counter.
 SharedMemory& CurrentRegion();
 
 } // namespace HLE

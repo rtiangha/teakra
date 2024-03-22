@@ -42,4 +42,4 @@ private:
     std::vector<char*> slabs;
 };
 
-}  // namespace Teakra::Common
+} // namespace Teakra::Common

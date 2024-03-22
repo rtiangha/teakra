@@ -20,8 +20,7 @@ namespace Teakra::IR {
 
 class LocationDescriptor {
 public:
-    explicit LocationDescriptor(u64 value)
-        : value(value) {}
+    explicit LocationDescriptor(u64 value) : value(value) {}
 
     bool operator==(const LocationDescriptor& o) const {
         return value == o.Value();
@@ -31,7 +30,9 @@ public:
         return !operator==(o);
     }
 
-    u64 Value() const { return value; }
+    u64 Value() const {
+        return value;
+    }
 
 private:
     u64 value;
@@ -42,9 +43,9 @@ private:
  * Their value should be known at compile time, otherwise an error is triggered.
  */
 struct StaticRegs {
-    bool sat = false;  // 1-bit, disable saturation when moving from acc
+    bool sat = false; // 1-bit, disable saturation when moving from acc
     bool sata = true; // 1-bit, disable saturation when moving to acc
-    u16 hwm = 0;     // 2-bit, half word mode, modify y on multiplication
+    u16 hwm = 0;      // 2-bit, half word mode, modify y on multiplication
 };
 
 enum class Opcode;
@@ -73,30 +74,66 @@ public:
     Block(Block&&);
     Block& operator=(Block&&);
 
-    bool empty() const { return instructions.empty(); }
-    size_type size() const { return instructions.size(); }
+    bool empty() const {
+        return instructions.empty();
+    }
+    size_type size() const {
+        return instructions.size();
+    }
 
-    Inst& front() { return instructions.front(); }
-    const Inst& front() const { return instructions.front(); }
+    Inst& front() {
+        return instructions.front();
+    }
+    const Inst& front() const {
+        return instructions.front();
+    }
 
-    Inst& back() { return instructions.back(); }
-    const Inst& back() const { return instructions.back(); }
+    Inst& back() {
+        return instructions.back();
+    }
+    const Inst& back() const {
+        return instructions.back();
+    }
 
-    iterator begin() { return instructions.begin(); }
-    const_iterator begin() const { return instructions.begin(); }
-    iterator end() { return instructions.end(); }
-    const_iterator end() const { return instructions.end(); }
+    iterator begin() {
+        return instructions.begin();
+    }
+    const_iterator begin() const {
+        return instructions.begin();
+    }
+    iterator end() {
+        return instructions.end();
+    }
+    const_iterator end() const {
+        return instructions.end();
+    }
 
-    reverse_iterator rbegin() { return instructions.rbegin(); }
-    const_reverse_iterator rbegin() const { return instructions.rbegin(); }
-    reverse_iterator rend() { return instructions.rend(); }
-    const_reverse_iterator rend() const { return instructions.rend(); }
+    reverse_iterator rbegin() {
+        return instructions.rbegin();
+    }
+    const_reverse_iterator rbegin() const {
+        return instructions.rbegin();
+    }
+    reverse_iterator rend() {
+        return instructions.rend();
+    }
+    const_reverse_iterator rend() const {
+        return instructions.rend();
+    }
 
-    const_iterator cbegin() const { return instructions.cbegin(); }
-    const_iterator cend() const { return instructions.cend(); }
+    const_iterator cbegin() const {
+        return instructions.cbegin();
+    }
+    const_iterator cend() const {
+        return instructions.cend();
+    }
 
-    const_reverse_iterator crbegin() const { return instructions.crbegin(); }
-    const_reverse_iterator crend() const { return instructions.crend(); }
+    const_reverse_iterator crbegin() const {
+        return instructions.crbegin();
+    }
+    const_reverse_iterator crend() const {
+        return instructions.crend();
+    }
 
     /**
      * Appends a new instruction to the end of this basic block,
@@ -148,11 +185,11 @@ public:
     const InstructionList& Instructions() const;
 
     /// Gets the terminal instruction for this basic block.
-    //Terminal GetTerminal() const;
+    // Terminal GetTerminal() const;
     /// Sets the terminal instruction for this basic block.
-    //void SetTerminal(Terminal term);
+    // void SetTerminal(Terminal term);
     /// Replaces the terminal instruction for this basic block.
-    //void ReplaceTerminal(Terminal term);
+    // void ReplaceTerminal(Terminal term);
     /// Determines whether or not this basic block has a terminal instruction.
     bool HasTerminal() const;
 
@@ -183,7 +220,7 @@ private:
     /// Memory pool for instruction list
     std::unique_ptr<Common::Pool> instruction_alloc_pool;
     /// Terminal instruction of this block.
-    //Terminal terminal = Term::Invalid{};
+    // Terminal terminal = Term::Invalid{};
 
     /// Number of cycles this block takes to execute.
     size_t cycle_count = 0;
@@ -192,4 +229,4 @@ private:
 /// Returns a string representation of the contents of block. Intended for debugging.
 std::string DumpBlock(const IR::Block& block);
 
-}  // namespace Dynarmic::IR
+} // namespace Teakra::IR
