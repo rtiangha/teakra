@@ -276,10 +276,10 @@ public:
         void* function_ptr;
         uintptr_t this_ptr = reinterpret_cast<uintptr_t>(this_object);
 
-#if defined(ARCHITECTURE_32BIT)
+#if defined(ARCHITECTURE_32BIT) || defined(_MSC_VER)
         static_assert(sizeof(T) == 8, "[x64 JIT] Invalid size for member function pointer");
         std::memcpy(&function_ptr, &func, sizeof(T));
-#elif defined(ARCHITECTURE_64BIT)
+#else
         static_assert(sizeof(T) == 16, "[x64 JIT] Invalid size for member function pointer");
         uint64_t arr[2];
         std::memcpy(arr, &func, sizeof(T));
