@@ -63,10 +63,12 @@ public:
 
     u16 GetChannelForDma(u16 dma_channel) const;
 
-    void SetExternalMemoryCallback(
-           std::function<u8 (u32)> read8 , std::function<void(u32, u8 )> write8 ,
-           std::function<u16(u32)> read16, std::function<void(u32, u16)> write16,
-           std::function<u32(u32)> read32, std::function<void(u32, u32)> write32) {
+    void SetExternalMemoryCallback(std::function<u8(u32)> read8,
+                                   std::function<void(u32, u8)> write8,
+                                   std::function<u16(u32)> read16,
+                                   std::function<void(u32, u16)> write16,
+                                   std::function<u32(u32)> read32,
+                                   std::function<void(u32, u32)> write32) {
 
         read_external8 = std::move(read8);
         write_external8 = std::move(write8);

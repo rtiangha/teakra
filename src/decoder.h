@@ -34,8 +34,8 @@ struct FilterOperandHelper<true, OperandAtT0, OperandAtT...> {
 
 template <typename OperandAtT0, typename... OperandAtT>
 struct FilterOperand<OperandAtT0, OperandAtT...> {
-    using result =
-        typename FilterOperandHelper<OperandAtT0::PassAsParameter, OperandAtT0, OperandAtT...>::result;
+    using result = typename FilterOperandHelper<OperandAtT0::PassAsParameter, OperandAtT0,
+                                                OperandAtT...>::result;
 };
 
 template <typename V, typename OperandListT>
@@ -49,7 +49,8 @@ struct VisitorFunctionWithoutFilter<V, OperandList<OperandAtT...>> {
 template <typename V, typename... OperandAtT>
 struct VisitorFunction {
     using type =
-        typename VisitorFunctionWithoutFilter<V, typename FilterOperand<OperandAtT...>::result>::type;
+        typename VisitorFunctionWithoutFilter<V,
+                                              typename FilterOperand<OperandAtT...>::result>::type;
 };
 
 template <typename V, u16 expected, typename... OperandAtT>

@@ -57,7 +57,8 @@ public:
     void SetMMIO(MMIORegion& mmio);
     u16 ProgramRead(u32 address) const;
     void ProgramWrite(u32 address, u16 value);
-    u16 DataRead(u16 address, bool bypass_mmio = false); // not const because it can be a FIFO register
+    u16 DataRead(u16 address,
+                 bool bypass_mmio = false); // not const because it can be a FIFO register
     void DataWrite(u16 address, u16 value, bool bypass_mmio = false);
     u16 DataReadA32(u32 address) const;
     void DataWriteA32(u32 address, u16 value);

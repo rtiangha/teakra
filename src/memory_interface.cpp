@@ -35,13 +35,13 @@ void MemoryInterface::DataWrite(u16 address, u16 value, bool bypass_mmio) {
     shared_memory.WriteWord(converted, value);
 }
 u16 MemoryInterface::DataReadA32(u32 address) const {
-    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize*2)-1))
-        + MemoryInterfaceUnit::DataMemoryOffset;
+    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize * 2) - 1)) +
+                    MemoryInterfaceUnit::DataMemoryOffset;
     return shared_memory.ReadWord(converted);
 }
 void MemoryInterface::DataWriteA32(u32 address, u16 value) {
-    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize*2)-1))
-        + MemoryInterfaceUnit::DataMemoryOffset;
+    u32 converted = (address & ((MemoryInterfaceUnit::DataMemoryBankSize * 2) - 1)) +
+                    MemoryInterfaceUnit::DataMemoryOffset;
     shared_memory.WriteWord(converted, value);
 }
 u16 MemoryInterface::MMIORead(u16 address) {
