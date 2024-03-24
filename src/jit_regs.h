@@ -124,9 +124,9 @@ union Mod1 {
     BitField<0, 8, u16> page;   // 8-bit, higher part of MemImm8 address
     BitField<12, 1, u16> stp16; // 1 bit. If set, stepi0/j0 will be exchanged along with cfgi/j in
                                 // banke, and use stepi0/j0 for steping
-    BitField<13, 1, u16> cmd; // 1-bit, step/mod method. 0 - Teak; 1 - TeakLite
-    BitField<14, 1, u16> epi; // 1-bit. If set, cause r3 = 0 when steping r3
-    BitField<15, 1, u16> epj; // 1-bit. If set, cause r7 = 0 when steping r7
+    BitField<13, 1, u16> cmd;   // 1-bit, step/mod method. 0 - Teak; 1 - TeakLite
+    BitField<14, 1, u16> epi;   // 1-bit. If set, cause r3 = 0 when steping r3
+    BitField<15, 1, u16> epj;   // 1-bit. If set, cause r7 = 0 when steping r7
 
     static u16 Mask() {
         return decltype(page)::mask | decltype(stp16)::mask | decltype(cmd)::mask |
