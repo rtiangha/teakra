@@ -1,4 +1,5 @@
 #include <array>
+#include <cstring>
 #include "ahbm.h"
 #include "apbp.h"
 #include "btdmp.h"
@@ -28,7 +29,7 @@ struct Teakra::Impl {
     MemoryInterface memory_interface{shared_memory, miu, mmio};
     Processor processor;
 
-    Impl(bool use_jit) : processor(core_timing, memory_interface, use_jit) {
+    Impl(bool use_jit, u8* dsp_memory) : shared_memory{dsp_memory}, processor(core_timing, memory_interface, use_jit) {
         using namespace std::placeholders;
         icu.SetInterruptHandler(std::bind(&Processor::SignalInterrupt, &processor, _1),
                                 std::bind(&Processor::SignalVectoredInterrupt, &processor, _1, _2));
@@ -48,7 +49,7 @@ struct Teakra::Impl {
     }
 
     void Reset() {
-        shared_memory.raw.fill(0);
+        std::memset(shared_memory.raw, 0, DspMemorySize);
         miu.Reset();
         apbp_from_cpu.Reset();
         apbp_from_dsp.Reset();
@@ -62,8 +63,9 @@ struct Teakra::Impl {
     }
 };
 
-Teakra::Teakra(bool use_jit) : impl_jit(new Impl(true)), impl_interp(new Impl(false)),
-      impl(use_jit ? impl_jit.get() : impl_interp.get()), use_jit(use_jit) {}
+Teakra::Teakra(const UserConfig& config) : impl_jit(new Impl(true, config.dsp_memory)),
+                                           impl_interp(new Impl(false, config.dsp_memory)),
+      impl(config.use_jit ? impl_jit.get() : impl_interp.get()), use_jit(use_jit) {}
 
 Teakra::~Teakra() = default;
 
@@ -73,14 +75,6 @@ void Teakra::Reset() {
 
 Processor& Teakra::GetProcessor() {
     return impl->processor;
-}
-
-std::array<std::uint8_t, 0x80000>& Teakra::GetDspMemory() {
-    return impl->shared_memory.raw;
-}
-
-const std::array<std::uint8_t, 0x80000>& Teakra::GetDspMemory() const {
-    return impl->shared_memory.raw;
 }
 
 u32 Teakra::Run(unsigned cycle) {

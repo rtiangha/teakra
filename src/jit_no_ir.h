@@ -649,7 +649,7 @@ public:
         }
 
         EmitConvertAddress(address, scratch);
-        c.mov(scratch, reinterpret_cast<uintptr_t>(mem.shared_memory.raw.data()));
+        c.mov(scratch, reinterpret_cast<uintptr_t>(mem.shared_memory.raw));
         c.mov(out.cvt16(), word[scratch + address * 2]);
 
         if constexpr (!bypass_mmio) {
@@ -2922,7 +2922,7 @@ public:
 
     void ProgramRead(Reg64 out, Reg64 address) {
         c.movzx(address, address.cvt16());
-        c.mov(out, reinterpret_cast<uintptr_t>(mem.GetMemory().raw.data()));
+        c.mov(out, reinterpret_cast<uintptr_t>(mem.GetMemory().raw));
         c.movzx(out, word[out + address * 2]);
     }
 
