@@ -1751,12 +1751,19 @@ std::vector<std::string> GetTokenList(std::uint16_t opcode, std::uint16_t expans
 
 std::string Do(std::uint16_t opcode, std::uint16_t expansion, std::optional<ArArpSettings> ar_arp) {
     auto v = GetTokenList(opcode, expansion, ar_arp);
+
     std::string last = v.back();
     std::string result;
     v.pop_back();
-    for (const auto& s : v) {
-        result += s + "    ";
+
+    if (v.empty()) return last;
+
+    result = v[0] + ", " + std::string(std::max(1, 8 - static_cast<int>(v[0].size())), ' ');
+
+    for (size_t i = 1; i < v.size(); i++) {
+        result += v[i] + ", ";
     }
+
     return result + last;
 }
 

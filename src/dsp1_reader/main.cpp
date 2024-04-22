@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
             fprintf(file, "\n>>>>>>>> Segment <<<<<<<<\n\n");
             for (unsigned pos = 0; pos < segment.data.size(); pos += 2) {
                 u16 opcode = segment.data[pos] | (segment.data[pos + 1] << 8);
-                fprintf(file, "%08X  %04X         ", segment.target + pos / 2, opcode);
+                fprintf(file, "%08X  |  0x%04X, ", segment.target + pos / 2, opcode);
                 bool expand = false;
                 u16 expand_value = 0;
                 if (Teakra::Disassembler::NeedExpansion(opcode)) {
@@ -104,11 +104,14 @@ int main(int argc, char** argv) {
                     pos += 2;
                     expand_value = segment.data[pos] | (segment.data[pos + 1] << 8);
                 }
+
                 std::string result = Teakra::Disassembler::Do(opcode, expand_value);
-                fprintf(file, "%s\n", result.c_str());
                 if (expand) {
-                    fprintf(file, "%08X  %04X ^^^\n", segment.target + pos / 2, expand_value);
+                    fprintf(file, "0x%04X,", expand_value);
+                } else {
+                    fprintf(file, "       ");
                 }
+                fprintf(file, "  |  %s\n", result.c_str());
             }
         }
 
