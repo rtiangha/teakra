@@ -7,3 +7,7 @@ endif()
 if (NOT TARGET xbyak::xbyak)
     add_subdirectory(xbyak)
 endif()
+
+if (NOT TARGET tsl::robin_map)
+    add_subdirectory(robin-map)
+endif()
