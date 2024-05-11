@@ -63,7 +63,7 @@ struct Teakra::Impl {
     }
 };
 
-Teakra::Teakra(const UserConfig& config) : impl_jit(new Impl(true, config.dsp_memory)),
+Teakra::Teakra(const UserConfig& config, bool use_jit) : impl_jit(new Impl(true, config.dsp_memory)),
                                            impl_interp(new Impl(false, config.dsp_memory)),
       impl(config.use_jit ? impl_jit.get() : impl_interp.get()), use_jit(use_jit) {}
 
