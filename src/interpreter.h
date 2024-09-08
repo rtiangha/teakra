@@ -379,7 +379,7 @@ public:
                     if (cycles_left >= 1)
                         cycles_left--;
 
-                    core_timing.Tick();
+                    core_timing.Tick(1);
                 }
             }
 
@@ -463,7 +463,7 @@ public:
                 cycles_left--;
 
             trace_file << std::setfill('0') << std::setw(8) << regs.pc << std::endl;
-            core_timing.Tick();
+            core_timing.Tick(1);
         }
     }
 
