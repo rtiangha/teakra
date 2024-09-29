@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <limits.h>
 #include <optional>
 #include <set>
 #include <stack>
